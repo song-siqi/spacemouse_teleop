@@ -1,0 +1,13 @@
+.venv/
+.uv-cache/
+.python-cache/
+.generated/
+.robot_descriptions_cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+logs/*.jsonl
+logs/*.json
+third_party/xarm_ros2/
+!.gitkeep

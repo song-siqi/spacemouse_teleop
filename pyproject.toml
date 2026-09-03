@@ -1,0 +1,37 @@
+[project]
+name = "spacemouse-teleop"
+version = "0.1.0"
+description = "SpaceMouse teleoperation front-end for xArm6 real robot and MuJoCo simulation backends."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+hardware = [
+    "hidapi>=0.15.0",
+    "pyspacemouse>=2.1.0",
+]
+sim = [
+    "mujoco>=3.2.0",
+    "numpy>=1.24.0",
+    "robot_descriptions>=3.1.0",
+    "xacrodoc>=2.0.1",
+]
+
+[project.scripts]
+spacemouse-diagnose = "spacemouse_teleop.cli.diagnose:main"
+spacemouse-probe = "spacemouse_teleop.cli.probe:main"
+spacemouse-debug = "spacemouse_teleop.cli.debug:main"
+spacemouse-mujoco-diagnose = "spacemouse_teleop.cli.mujoco_diagnose:main"
+spacemouse-mujoco-gripper-contact-probe = "spacemouse_teleop.cli.mujoco_gripper_contact_probe:main"
+spacemouse-mujoco-gripper-lift-probe = "spacemouse_teleop.cli.mujoco_gripper_lift_probe:main"
+spacemouse-mujoco-gripper-press-probe = "spacemouse_teleop.cli.mujoco_gripper_press_probe:main"
+spacemouse-mujoco-response-probe = "spacemouse_teleop.cli.mujoco_response_probe:main"
+spacemouse-mujoco-teleop = "spacemouse_teleop.cli.mujoco_teleop:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true

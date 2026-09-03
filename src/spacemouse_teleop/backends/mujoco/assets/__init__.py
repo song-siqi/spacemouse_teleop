@@ -1,0 +1,1 @@
+"""Packaged MuJoCo assets."""

@@ -1,0 +1,32 @@
+{
+  "frame": "link_base",
+  "require_deadman": false,
+  "deadman_button": 0,
+  "translation_only_button": null,
+  "rotation_only_button": null,
+  "gripper": {
+    "open_button": 0,
+    "close_button": 1,
+    "speed_per_s": 0.8,
+    "initial_closedness": 0.0
+  },
+  "deadzone": 0.08,
+  "filter_alpha": 0.35,
+  "linear_scale_mps": 0.12,
+  "angular_scale_radps": 0.8,
+  "max_linear_speed_mps": 0.2,
+  "max_angular_speed_radps": 1.0,
+  "timeout_s": 0.25,
+  "mapping": {
+    "linear": {
+      "x": {"source": "x", "sign": 1.0},
+      "y": {"source": "y", "sign": 1.0},
+      "z": {"source": "z", "sign": 1.0}
+    },
+    "angular": {
+      "x": {"source": "roll", "sign": 1.0},
+      "y": {"source": "pitch", "sign": 1.0},
+      "z": {"source": "yaw", "sign": 1.0}
+    }
+  }
+}
