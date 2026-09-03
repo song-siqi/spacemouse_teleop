@@ -83,14 +83,17 @@ def _main() -> None:
                 now = time.monotonic()
                 if now >= next_print:
                     next_print = now + print_period
+                    gripper = "none" if command.gripper is None else f"{command.gripper:0.3f}"
                     print(
                         f"enabled={int(command.enabled)} frame={command.frame} "
                         f"v={format_vec(command.linear_vel_mps)} "
                         f"w={format_vec(command.angular_vel_radps)} "
                         f"dpos={format_vec(command.delta_pos_m)} "
                         f"drot={format_vec(command.delta_rot_rad)} "
-                        f"gripper={command.gripper:0.3f} "
+                        f"gintent={command.gripper_intent} "
+                        f"gripper={gripper} "
                         f"dgripper={command.delta_gripper:+0.4f} "
+                        f"gripper_vel={command.gripper_velocity:+0.3f} "
                         f"dt={command.dt:0.4f}"
                     )
                 rate.sleep()

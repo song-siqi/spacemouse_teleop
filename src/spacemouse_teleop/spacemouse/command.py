@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, Literal, Optional, Tuple
 
 
 Vector3 = Tuple[float, float, float]
+GripperIntent = Literal["hold", "open", "close"]
 
 
 def vector3(values: Iterable[float]) -> Vector3:
@@ -43,14 +44,18 @@ class TeleopCommand:
     angular_vel_radps: Vector3
     delta_pos_m: Vector3
     delta_rot_rad: Vector3
-    # Target gripper closedness. 0.0 is fully open, 1.0 is fully closed.
-    gripper: float
     enabled: bool
     frame: str
     dt: float
     timestamp: float
+    gripper_intent: GripperIntent = "hold"
+    # Optional legacy/backend-internal target gripper closedness.
+    # SpaceMouse teleop should prefer gripper_intent.
+    gripper: Optional[float] = None
     # Change in normalized gripper closedness for this command step.
     delta_gripper: float = 0.0
+    # Normalized gripper closedness velocity; positive closes, negative opens.
+    gripper_velocity: float = 0.0
 
     def to_dict(self) -> Dict[str, object]:
         return asdict(self)

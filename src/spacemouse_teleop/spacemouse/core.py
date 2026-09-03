@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Mapping, Optional, Tuple
 
 from spacemouse_teleop.spacemouse.command import (
+    GripperIntent,
     RawSpaceMouseState,
     TeleopCommand,
     Vector3,
@@ -17,10 +18,6 @@ def _clamp(value: float, limit: float) -> float:
     if value < -limit:
         return -limit
     return value
-
-
-def _clamp01(value: float) -> float:
-    return max(0.0, min(1.0, float(value)))
 
 
 def _deadzone(value: float, threshold: float) -> float:
@@ -54,8 +51,6 @@ class TeleopConfig:
     rotation_only_button: Optional[int] = None
     gripper_open_button: Optional[int] = 0
     gripper_close_button: Optional[int] = 1
-    gripper_speed_per_s: float = 0.8
-    gripper_initial_closedness: float = 0.0
     deadzone: float = 0.08
     filter_alpha: float = 0.35
     linear_scale_mps: float = 0.12
@@ -89,8 +84,6 @@ class TeleopConfig:
             "rotation_only_button",
             "gripper_open_button",
             "gripper_close_button",
-            "gripper_speed_per_s",
-            "gripper_initial_closedness",
             "deadzone",
             "filter_alpha",
             "linear_scale_mps",
@@ -108,12 +101,6 @@ class TeleopConfig:
                 config.gripper_open_button = gripper["open_button"]  # type: ignore[assignment]
             if "close_button" in gripper:
                 config.gripper_close_button = gripper["close_button"]  # type: ignore[assignment]
-            if "speed_per_s" in gripper:
-                config.gripper_speed_per_s = float(gripper["speed_per_s"])
-            if "initial_closedness" in gripper:
-                config.gripper_initial_closedness = float(
-                    gripper["initial_closedness"]
-                )
 
         mapping = data.get("mapping")
         if isinstance(mapping, Mapping):
@@ -137,8 +124,6 @@ class TeleopConfig:
         config.rotation_only_button = _optional_int(config.rotation_only_button)
         config.gripper_open_button = _optional_int(config.gripper_open_button)
         config.gripper_close_button = _optional_int(config.gripper_close_button)
-        config.gripper_speed_per_s = max(0.0, float(config.gripper_speed_per_s))
-        config.gripper_initial_closedness = _clamp01(config.gripper_initial_closedness)
         config.deadzone = float(config.deadzone)
         config.filter_alpha = _clamp(float(config.filter_alpha), 1.0)
         config.linear_scale_mps = float(config.linear_scale_mps)
@@ -159,7 +144,6 @@ class TeleopCore:
         self._last_timestamp: Optional[float] = None
         self._filtered_linear: Vector3 = (0.0, 0.0, 0.0)
         self._filtered_angular: Vector3 = (0.0, 0.0, 0.0)
-        self._gripper_closedness = _clamp01(self.config.gripper_initial_closedness)
 
     def process(self, state: RawSpaceMouseState) -> TeleopCommand:
         now = float(state.timestamp)
@@ -180,11 +164,7 @@ class TeleopCore:
             linear_raw = (0.0, 0.0, 0.0)
             angular_raw = (0.0, 0.0, 0.0)
 
-        delta_gripper = self._gripper_delta(state, dt, enabled)
-        if delta_gripper:
-            self._gripper_closedness = _clamp01(
-                self._gripper_closedness + delta_gripper
-            )
+        gripper_intent = self._gripper_intent(state, enabled)
 
         linear_vel = _scale_vector(
             linear_raw, self.config.linear_scale_mps, self.config.max_linear_speed_mps
@@ -205,12 +185,14 @@ class TeleopCore:
             angular_vel_radps=self._filtered_angular,
             delta_pos_m=delta_pos,
             delta_rot_rad=delta_rot,
-            gripper=self._gripper_closedness,
             enabled=enabled,
             frame=self.config.frame,
             dt=dt,
             timestamp=now,
-            delta_gripper=delta_gripper,
+            gripper_intent=gripper_intent,
+            gripper=None,
+            delta_gripper=0.0,
+            gripper_velocity=0.0,
         )
 
     def zero_command(self, timestamp: float) -> TeleopCommand:
@@ -222,12 +204,14 @@ class TeleopCore:
             angular_vel_radps=(0.0, 0.0, 0.0),
             delta_pos_m=(0.0, 0.0, 0.0),
             delta_rot_rad=(0.0, 0.0, 0.0),
-            gripper=self._gripper_closedness,
             enabled=False,
             frame=self.config.frame,
             dt=0.0,
             timestamp=timestamp,
+            gripper_intent="hold",
+            gripper=None,
             delta_gripper=0.0,
+            gripper_velocity=0.0,
         )
 
     def _compute_dt(self, timestamp: float) -> float:
@@ -257,15 +241,16 @@ class TeleopCore:
             return True
         return self._button_pressed(state, self.config.deadman_button)
 
-    def _gripper_delta(
-        self, state: RawSpaceMouseState, dt: float, enabled: bool
-    ) -> float:
-        if not enabled or dt <= 0.0:
-            return 0.0
+    def _gripper_intent(
+        self, state: RawSpaceMouseState, enabled: bool
+    ) -> GripperIntent:
+        if not enabled:
+            return "hold"
         opening = self._button_pressed(state, self.config.gripper_open_button)
         closing = self._button_pressed(state, self.config.gripper_close_button)
-        direction = float(int(closing) - int(opening))
-        return direction * self.config.gripper_speed_per_s * dt
+        if opening == closing:
+            return "hold"
+        return "open" if opening else "close"
 
     @staticmethod
     def _button_pressed(state: RawSpaceMouseState, index: Optional[int]) -> bool:

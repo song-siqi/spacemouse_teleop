@@ -6,9 +6,7 @@
   "rotation_only_button": null,
   "gripper": {
     "open_button": 0,
-    "close_button": 1,
-    "speed_per_s": 0.8,
-    "initial_closedness": 0.0
+    "close_button": 1
   },
   "deadzone": 0.08,
   "filter_alpha": 0.55,

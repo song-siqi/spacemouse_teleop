@@ -28,11 +28,16 @@ GitHub organization. UFACTORY's public simulation support is ROS/Gazebo and
 generated locally from the official xArm6 xacro/URDF source:
 
 ```text
-third_party/xarm_ros2 xArm6 xacro/URDF
+src/spacemouse_teleop/backends/mujoco/assets/xarm_ros2 xArm6 xacro/URDF
   -> MuJoCo URDF compiler
   -> generated MJCF
   -> local actuator/site/table/cube additions
 ```
+
+The package-local `assets/xarm_ros2` directory is a minimal copied subset of
+the upstream UFACTORY `xarm_ros2` model assets. The ignored
+`third_party/xarm_ros2` checkout is only a reference for auditing or refreshing
+that subset; the simulator should not require it at runtime.
 
 `ensure_official_xarm6_table_cube_mjcf()` writes the generated model under
 `.generated/mujoco/`. The generated scene contains:
@@ -55,6 +60,10 @@ TeleopCommand EE delta
   -> damped least-squares IK
   -> joint position target
   -> MuJoCo position actuator
+
+TeleopCommand gripper intent
+  -> MuJoCo backend open/close/hold target policy
+  -> xArm gripper actuator target
 ```
 
 In `xarm_ros2`, MoveIt Servo publishes `JointTrajectory` position targets to `/xarm6_traj_controller/joint_trajectory`, and the real hardware backend eventually calls `set_servo_angle_j`. The MuJoCo backend uses the same position-target idea without ROS2.
@@ -82,11 +91,14 @@ green collision geometry in the viewer. Finger and pad collisions are masked to
 interact with the cube but not the table, while the cube still collides with the
 table as usual.
 
-The generated model sets a smaller MuJoCo timestep, Newton solver, and no-slip
-iterations, then gives table/cube contacts stiff `solref`/`solimp` values to
-reduce visible tabletop penetration. Gripper contacts use `condim=3` so they
-provide pinch friction without torsional or rolling constraints that can feel
-like artificial glue.
+The generated model borrows the friction scale from
+`MingqianW/embodied-ai-xarm`: table `1.0 0.01 0.001`, cube
+`1.2 0.01 0.001`, distal finger meshes `1.2 0.01 0.001`, and fingertip pads
+`2.0 0.02 0.002`. It keeps our smaller MuJoCo timestep, Newton solver, no-slip
+iterations, and stiff table/cube `solref`/`solimp` values to reduce visible
+tabletop penetration. Gripper contacts use `condim=3` so they provide pinch
+friction without torsional or rolling constraints that can feel like artificial
+glue.
 
 Kinematic arm execution still writes the arm pose directly for responsive
 teleop, but it now interpolates those writes across MuJoCo substeps and provides
@@ -96,14 +108,14 @@ motion it needs for frictional lift tests.
 The generated scene has several fixed cameras. Start with a chosen view:
 
 ```bash
-python scripts/mujoco_teleop.py --backend pyspacemouse --viewer --camera rear_side
+SPACEMOUSE_TELEOP_CAMERA=rear_side ./scripts/run_mujoco_spacemouse.sh
 ```
 
 Show several views at once inside the viewer:
 
 ```bash
-python scripts/mujoco_teleop.py --backend pyspacemouse --viewer --camera rear_side --multiview
-python scripts/mujoco_teleop.py --backend pyspacemouse --viewer --camera rear_side --multiview --multiview-cameras overview,front,side,top --multiview-layout grid
+SPACEMOUSE_TELEOP_MULTIVIEW=1 ./scripts/run_mujoco_spacemouse.sh
+SPACEMOUSE_TELEOP_MULTIVIEW_CAMERAS=overview,front,side,top SPACEMOUSE_TELEOP_MULTIVIEW_LAYOUT=grid ./scripts/run_mujoco_spacemouse.sh
 ```
 
 To debug the model independently from SpaceMouse input:

@@ -17,11 +17,19 @@ configs/                         shared launch/runtime config
 scripts/                         direct debug entrypoints
 src/spacemouse_teleop/spacemouse SpaceMouse reader, mapping, filters, command contract
 src/spacemouse_teleop/backends   execution adapters, one subdirectory per backend
+src/spacemouse_teleop/backends/mujoco/assets/xarm_ros2
+                                 repo-local xArm6/gripper simulation asset subset
 src/spacemouse_teleop/recording  lightweight debug/data logging helpers
 third_party/xarm_ros2/           read-only upstream reference clone
 ```
 
 The cloned `third_party/xarm_ros2` directory is a read-only reference. Its SpaceMouse path maps `sensor_msgs/Joy` into `geometry_msgs/TwistStamped` on `/servo_server/delta_twist_cmds`, then MoveIt Servo converts that Cartesian command into joint trajectory commands for the xArm controller. The top-level `.gitignore` excludes this local clone so the main project does not accidentally vendor the upstream repository; add it deliberately as a submodule later if we want to pin an exact upstream revision.
+
+MuJoCo runtime generation does not depend on the ignored `third_party` checkout.
+The required xArm6/gripper xacro, mesh, and yaml subset is copied into
+`src/spacemouse_teleop/backends/mujoco/assets/xarm_ros2`, with the upstream
+license kept next to those files. Use `third_party/xarm_ros2` only as an audit
+and refresh reference.
 
 If the directory is missing, recreate the local reference with:
 
@@ -53,16 +61,18 @@ button 0 -> open gripper while held
 button 1 -> close gripper while held
 ```
 
-The gripper command is expressed as normalized closedness:
+The SpaceMouse gripper command is expressed as a discrete operator intent:
 
 ```text
-gripper = 0.0  fully open
-gripper = 1.0  fully closed
+gripper_intent = open
+gripper_intent = close
+gripper_intent = hold
 ```
 
-Button presses integrate this value over time. Releasing both buttons holds the
-current target closedness, so the arm can keep moving while the gripper target
-stays fixed.
+Button presses do not make the SpaceMouse layer maintain an absolute gripper
+target or velocity ramp. Each backend/controller decides what target the intent
+means for its hardware or simulator. The MuJoCo backend maps `open` and `close`
+to immediate endpoint targets and leaves `hold` at the current controller target.
 
 Defaults in `configs/spacemouse_xarm6.json`:
 
@@ -74,7 +84,6 @@ angular_scale_radps: 0.8
 max_linear_speed_mps: 0.2
 max_angular_speed_radps: 1.0
 timeout_s: 0.25
-gripper.speed_per_s: 0.8
 ```
 
 ## Quick Checks
@@ -137,13 +146,22 @@ UV_CACHE_DIR=.uv-cache uv pip install -e '.[sim,hardware]'
 Headless smoke test with mock SpaceMouse input:
 
 ```bash
-python scripts/mujoco_teleop.py --backend mock --hz 60 --config configs/spacemouse_xarm6_mujoco.json --duration 5 --print-rate 5 --log logs/mujoco_mock.jsonl
+SPACEMOUSE_TELEOP_BACKEND=mock SPACEMOUSE_TELEOP_VIEWER=0 ./scripts/run_mujoco_spacemouse.sh --duration 5
 ```
 
 Real SpaceMouse teleop with the MuJoCo viewer:
 
 ```bash
-python scripts/mujoco_teleop.py --backend pyspacemouse --axis-convention ros --hz 60 --config configs/spacemouse_xarm6_mujoco.json --target-mode velocity --arm-control-mode kinematic --position-gain 0.6 --orientation-gain 0.35 --viewer --camera rear_side --multiview --print-rate 5 --log logs/mujoco_spacemouse.jsonl
+./scripts/run_mujoco_spacemouse.sh
+```
+
+The launcher uses `.venv/bin/mjpython` automatically when opening the MuJoCo
+viewer on macOS. It still forwards extra CLI flags, so one-off runs can override
+the defaults:
+
+```bash
+SPACEMOUSE_TELEOP_BACKEND=mock SPACEMOUSE_TELEOP_VIEWER=0 ./scripts/run_mujoco_spacemouse.sh --duration 2
+SPACEMOUSE_TELEOP_CAMERA=overview SPACEMOUSE_TELEOP_MULTIVIEW=0 ./scripts/run_mujoco_spacemouse.sh
 ```
 
 I did not find a published UFACTORY xArm6 MJCF in the official GitHub organization. The official public simulation support is ROS/Gazebo in `xarm_ros2` and PyBullet/panda-gym in `uf-gym`; the curated MuJoCo Menagerie currently has xArm7 MJCF, but not xArm6.
@@ -156,6 +174,10 @@ official xArm6 xacro/URDF
   -> .generated/mujoco/xarm6_table_cube.xarm_gripper.official_derived.xml
   -> local TCP eef site, joint position actuators, gripper, table, cube, cameras
 ```
+
+The "official xArm6 xacro/URDF" input is the repo-local MuJoCo asset subset
+under `src/spacemouse_teleop/backends/mujoco/assets/xarm_ros2`, not the ignored
+reference clone under `third_party`.
 
 This matters because loading URDF directly into MuJoCo produces robot joints but no actuator controls. The generated tabletop scene has a fixed xArm6, six arm `joint*_pos` position actuators, a `gripper_pos` actuator, an `eef` site, and a free cube body for teleop tests.
 It also includes fixed cameras named `rear_side`, `overview`, `front`, `side`, and `top`.
@@ -196,11 +218,14 @@ finger shell touching the table first. The `eef` marker is hidden in the viewer
 and placed at the grasp center so it does not contact or visually occlude the
 cube.
 
-The generated scene also sets a stiffer MuJoCo contact solver (`timestep=0.001`,
-Newton solver, extra no-slip iterations) and makes the table/cube contact much
-harder than the default URDF conversion. Gripper contacts use `condim=3`, so the
-pinch relies on sliding friction without extra torsional/rolling friction that
-can make the cube feel glued to the fingers.
+The generated scene uses friction values adapted from the tuned
+`MingqianW/embodied-ai-xarm` MuJoCo task scene: table `1.0 0.01 0.001`, cube
+`1.2 0.01 0.001`, distal finger meshes `1.2 0.01 0.001`, and fingertip pads
+`2.0 0.02 0.002`. It keeps our stiffer tabletop contact solver
+(`timestep=0.001`, Newton solver, extra no-slip iterations, stiff table/cube
+`solref`/`solimp`) to reduce visible tabletop penetration. Gripper contacts use
+`condim=3`, so the pinch relies on sliding friction without extra
+torsional/rolling friction that can make the cube feel glued to the fingers.
 
 In kinematic arm mode, MuJoCo receives interpolated joint positions plus the
 matching joint velocities. This lets contact friction see that the gripper is
@@ -239,8 +264,8 @@ python scripts/mujoco_teleop.py --backend mock --list-cameras
 Choose the thumbnail cameras or layout:
 
 ```bash
-python scripts/mujoco_teleop.py --backend pyspacemouse --viewer --camera rear_side --multiview --multiview-cameras overview,front,side,top --multiview-layout grid
-python scripts/mujoco_teleop.py --backend pyspacemouse --viewer --camera rear_side --multiview --multiview-cameras front,side,top --multiview-layout column
+SPACEMOUSE_TELEOP_MULTIVIEW_CAMERAS=overview,front,side,top SPACEMOUSE_TELEOP_MULTIVIEW_LAYOUT=grid ./scripts/run_mujoco_spacemouse.sh
+SPACEMOUSE_TELEOP_MULTIVIEW_CAMERAS=front,side,top SPACEMOUSE_TELEOP_MULTIVIEW_LAYOUT=column ./scripts/run_mujoco_spacemouse.sh
 ```
 
 The MuJoCo teleop default uses `--target-mode velocity`, which applies each
@@ -261,16 +286,23 @@ linear_vel_mps:  vx, vy, vz
 angular_vel_radps: wx, wy, wz
 delta_pos_m: linear velocity integrated over dt
 delta_rot_rad: angular velocity integrated over dt
-gripper: target gripper closedness, 0.0 open to 1.0 closed
-delta_gripper: closedness change integrated from the button state over dt
+gripper: optional legacy/backend-internal target closedness
+gripper_intent: open, close, or hold
+delta_gripper: optional legacy/backend-internal closedness delta
+gripper_velocity: optional legacy/backend-internal closedness velocity
 enabled: whether the command should be executed
 frame: command frame, default link_base
 ```
 
-The recorder intentionally logs raw input, filtered command, and deltas so dataset action encoding can stay independent from the SpaceMouse device.
+`gripper` is optional and treated as a legacy/backend-internal absolute target.
+`delta_gripper` and `gripper_velocity` are also retained for compatibility. The
+live SpaceMouse path uses `gripper_intent` so the wrapper reports operator intent
+instead of doing controller state integration. The recorder intentionally logs
+raw input, filtered command, and backend observations so dataset action encoding
+can stay independent from the SpaceMouse device.
 
-For the real xArm ROS2 backend, the same normalized value maps to official xArm
-Gripper commands:
+For the real xArm ROS2 backend, the backend should turn `open` or `close` into
+its controller target, then map that target to official xArm Gripper commands:
 
 ```text
 /xarm_gripper/gripper_action position = 0.86 * gripper

@@ -154,6 +154,7 @@ class XArm6TableCubeEnv:
         self.target_quat = np.array([1.0, 0.0, 0.0, 0.0])
         self.target_qpos = np.asarray(HOME_QPOS, dtype=float)
         self.target_gripper_closedness = 0.0
+        self._last_gripper_command_direction = 0
         self.last_ik_error_norm = 0.0
 
     def reset(self, qpos: Sequence[float] = HOME_QPOS) -> MujocoObservation:
@@ -162,6 +163,7 @@ class XArm6TableCubeEnv:
         self.data.qpos[self.qpos_ids] = self.target_qpos
         self.data.ctrl[self.actuator_ids] = self.target_qpos
         self.target_gripper_closedness = 0.0
+        self._last_gripper_command_direction = 0
         self._set_gripper_qpos_from_target()
         self._apply_gripper_target()
         self.mujoco.mj_forward(self.model, self.data)
@@ -195,7 +197,7 @@ class XArm6TableCubeEnv:
             self.target_quat = quat_multiply(delta_quat, anchor_quat)
 
         if self.has_gripper:
-            self.target_gripper_closedness = _clamp01(command.gripper)
+            self._update_gripper_target(command)
             self._apply_gripper_target()
 
         result = self.ik.solve(self.data, self.target_pos, self.target_quat, dt=dt)
@@ -279,6 +281,33 @@ class XArm6TableCubeEnv:
         joint_pos = lower + (upper - lower) * self.target_gripper_closedness
         if self.has_gripper_actuators:
             self.data.ctrl[self.gripper_actuator_ids] = joint_pos
+
+    def _update_gripper_target(self, command: TeleopCommand) -> None:
+        if command.gripper_intent == "open":
+            self.target_gripper_closedness = 0.0
+            self._last_gripper_command_direction = -1
+            return
+        if command.gripper_intent == "close":
+            self.target_gripper_closedness = 1.0
+            self._last_gripper_command_direction = 1
+            return
+        if command.gripper_intent != "hold":
+            raise ValueError(f"unknown gripper intent: {command.gripper_intent}")
+
+        delta = float(command.delta_gripper)
+        if delta != 0.0:
+            direction = 1 if delta > 0.0 else -1
+            if direction != self._last_gripper_command_direction:
+                self.target_gripper_closedness = self._observed_gripper_closedness()
+            self.target_gripper_closedness = _clamp01(
+                self.target_gripper_closedness + delta
+            )
+            self._last_gripper_command_direction = direction
+            return
+
+        self._last_gripper_command_direction = 0
+        if command.gripper is not None:
+            self.target_gripper_closedness = _clamp01(command.gripper)
 
     def _set_gripper_qpos_from_target(self) -> None:
         if not self.has_gripper:

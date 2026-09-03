@@ -26,7 +26,8 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_GENERATED_DIR = REPO_ROOT / ".generated" / "mujoco"
 DEFAULT_ROBOT_DESCRIPTIONS_CACHE = REPO_ROOT / ".robot_descriptions_cache"
 DEFAULT_END_EFFECTOR = END_EFFECTOR_XARM_GRIPPER
-LOCAL_XARM_ROS2_PATH = REPO_ROOT / "third_party" / "xarm_ros2"
+MUJOCO_ASSET_ROOT = Path(__file__).resolve().parent / "assets"
+LOCAL_XARM_ROS2_PATH = MUJOCO_ASSET_ROOT / "xarm_ros2"
 LOCAL_XARM_DESCRIPTION_PATH = LOCAL_XARM_ROS2_PATH / "xarm_description"
 ARM_BODY_NAMES = ("link1", "link2", "link3", "link4", "link5", "link6")
 CAMERA_NAMES = ("rear_side", "overview", "front", "side", "top")
@@ -40,6 +41,14 @@ CAMERA_SPECS: Mapping[str, Tuple[Vector3, Vector3, Vector3, float]] = {
     "side": ((0.45, -1.25, 0.98), (0.45, 0.00, 0.90), (0.0, 0.0, 1.0), 38.0),
     "top": ((0.45, 0.00, 1.80), (0.45, 0.00, 0.72), (1.0, 0.0, 0.0), 34.0),
 }
+
+# Friction values follow the tuned MuJoCo xArm task scene in
+# MingqianW/embodied-ai-xarm (commit 42bf191), while the solver/solref settings
+# below remain slightly stiffer for interactive teleop tabletop contact.
+TABLE_FRICTION = "1.0 0.01 0.001"
+CUBE_FRICTION = "1.2 0.01 0.001"
+FINGER_MESH_FRICTION = "1.2 0.01 0.001"
+FINGER_PAD_FRICTION = "2.0 0.02 0.002"
 
 XARM6_XACRO_ARGS = {
     "add_gripper": "false",
@@ -273,7 +282,7 @@ def _write_table_cube_scene(
             "pos": "0.45 0 0.36",
             "size": "0.55 0.45 0.36",
             "rgba": "0.52 0.48 0.42 1",
-            "friction": "0.8 0.005 0.0001",
+            "friction": TABLE_FRICTION,
             "condim": "3",
             "priority": "2",
             "solimp": "0.995 0.999 0.0001",
@@ -298,7 +307,7 @@ def _write_table_cube_scene(
             "size": "0.025 0.025 0.025",
             "mass": "0.05",
             "rgba": "0.90 0.24 0.14 1",
-            "friction": "1.0 0.005 0.0001",
+            "friction": CUBE_FRICTION,
             "condim": "3",
             "priority": "1",
             "solimp": "0.995 0.999 0.0001",
@@ -528,7 +537,7 @@ def _configure_gripper_mesh_collisions(root: ET.Element) -> None:
             geom.set("name", geom_name)
             geom.set("contype", "2")
             geom.set("conaffinity", "2")
-            geom.set("friction", "0.8 0.005 0.0001")
+            geom.set("friction", FINGER_MESH_FRICTION)
             geom.set("condim", "3")
             geom.set("priority", "2")
             geom.set("solimp", "0.9 0.98 0.001")
@@ -573,7 +582,7 @@ def _add_gripper_pad_collisions(root: ET.Element) -> None:
                 "rgba": "0.05 0.65 0.20 0",
                 "contype": "2",
                 "conaffinity": "2",
-                "friction": "2.5 0.005 0.0001",
+                "friction": FINGER_PAD_FRICTION,
                 "condim": "3",
                 "priority": "3",
                 "solimp": "0.9 0.98 0.001",

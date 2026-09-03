@@ -3,12 +3,18 @@ import xml.etree.ElementTree as ET
 
 from spacemouse_teleop.backends.mujoco import (
     CAMERA_NAMES,
+    CUBE_FRICTION,
+    FINGER_MESH_FRICTION,
+    FINGER_PAD_FRICTION,
     GRIPPER_ACTUATOR_NAMES,
     GRIPPER_BODY_NAMES,
     GRIPPER_JOINT_NAMES,
+    GRIPPER_JOINT_LIMIT_RAD,
     GRIPPER_FINGER_MESH_COLLISION_GEOM_NAMES,
     GRIPPER_PAD_GEOM_NAMES,
     JOINT_NAMES,
+    LOCAL_XARM_ROS2_PATH,
+    TABLE_FRICTION,
     XArm6TableCubeEnv,
     ensure_official_xarm6_table_cube_mjcf,
 )
@@ -66,12 +72,14 @@ class MujocoAssetTest(unittest.TestCase):
         self.assertIsNotNone(table_geom)
         self.assertEqual(table_geom.attrib.get("condim"), "3")
         self.assertEqual(table_geom.attrib.get("priority"), "2")
+        self.assertEqual(table_geom.attrib.get("friction"), TABLE_FRICTION)
         self.assertEqual(table_geom.attrib.get("solref"), "0.0015 1")
         cube_geom = root.find(".//geom[@name='cube_geom']")
         self.assertIsNotNone(cube_geom)
         self.assertEqual(cube_geom.attrib.get("contype"), "3")
         self.assertEqual(cube_geom.attrib.get("conaffinity"), "3")
         self.assertEqual(cube_geom.attrib.get("condim"), "3")
+        self.assertEqual(cube_geom.attrib.get("friction"), CUBE_FRICTION)
         self.assertGreaterEqual(
             len(root.findall(".//equality/joint")),
             len(GRIPPER_JOINT_NAMES) - 1,
@@ -82,6 +90,7 @@ class MujocoAssetTest(unittest.TestCase):
             self.assertEqual(pad_geom.attrib.get("contype"), "2")
             self.assertEqual(pad_geom.attrib.get("conaffinity"), "2")
             self.assertEqual(pad_geom.attrib.get("condim"), "3")
+            self.assertEqual(pad_geom.attrib.get("friction"), FINGER_PAD_FRICTION)
         active_finger_meshes = set(GRIPPER_FINGER_MESH_COLLISION_GEOM_NAMES)
         for body_name in GRIPPER_BODY_NAMES:
             body = root.find(f".//body[@name='{body_name}']")
@@ -92,9 +101,27 @@ class MujocoAssetTest(unittest.TestCase):
                         self.assertEqual(geom.attrib.get("contype"), "2")
                         self.assertEqual(geom.attrib.get("conaffinity"), "2")
                         self.assertEqual(geom.attrib.get("condim"), "3")
+                        self.assertEqual(
+                            geom.attrib.get("friction"), FINGER_MESH_FRICTION
+                        )
                     else:
                         self.assertEqual(geom.attrib.get("contype"), "0")
                         self.assertEqual(geom.attrib.get("conaffinity"), "0")
+
+    def test_mujoco_assets_are_repo_local_not_third_party_runtime_links(self):
+        self.assertTrue(LOCAL_XARM_ROS2_PATH.is_dir())
+        self.assertNotIn("third_party", LOCAL_XARM_ROS2_PATH.as_posix())
+
+        expected_files = (
+            "xarm_description/urdf/xarm_device.urdf.xacro",
+            "xarm_description/urdf/xarm6/xarm6_robot_macro.xacro",
+            "xarm_description/urdf/gripper/xarm_gripper_macro.xacro",
+            "xarm_description/meshes/xarm6/visual/link_base.stl",
+            "xarm_description/meshes/gripper/xarm/left_finger.stl",
+            "xarm_controller/config/xarm6_controllers.yaml",
+        )
+        for relative_path in expected_files:
+            self.assertTrue((LOCAL_XARM_ROS2_PATH / relative_path).is_file())
 
     def test_generated_model_loads_with_mujoco_actuators(self):
         try:
@@ -145,6 +172,84 @@ class MujocoAssetTest(unittest.TestCase):
         self.assertTrue(
             all(abs(value - 0.425) < 0.005 for value in observation.gripper_joint_pos)
         )
+
+    def test_mujoco_gripper_delta_reverses_from_observed_closedness(self):
+        try:
+            import mujoco  # noqa: F401
+        except ImportError:
+            self.skipTest("MuJoCo is not installed")
+
+        hz = 10.0
+        env = XArm6TableCubeEnv(control_hz=hz)
+        env.reset()
+        lower, upper = GRIPPER_JOINT_LIMIT_RAD
+        observed_closedness = 0.55
+        env.target_gripper_closedness = 1.0
+        env.data.qpos[env.gripper_qpos_ids] = lower + (
+            upper - lower
+        ) * observed_closedness
+        env.mujoco.mj_forward(env.model, env.data)
+        observed = env.observe().gripper_closedness
+
+        observation = env.step_command(
+            TeleopCommand(
+                linear_vel_mps=(0.0, 0.0, 0.0),
+                angular_vel_radps=(0.0, 0.0, 0.0),
+                delta_pos_m=(0.0, 0.0, 0.0),
+                delta_rot_rad=(0.0, 0.0, 0.0),
+                enabled=True,
+                frame="link_base",
+                dt=1.0 / hz,
+                timestamp=0.0,
+                delta_gripper=-0.1,
+                gripper_velocity=-1.0,
+            )
+        )
+
+        self.assertAlmostEqual(
+            observation.target_gripper_closedness, observed - 0.1, delta=0.01
+        )
+        self.assertLess(observation.target_gripper_closedness, observed)
+
+    def test_mujoco_gripper_intent_targets_endpoints_immediately(self):
+        try:
+            import mujoco  # noqa: F401
+        except ImportError:
+            self.skipTest("MuJoCo is not installed")
+
+        env = XArm6TableCubeEnv(control_hz=60.0)
+        env.reset()
+        env.target_gripper_closedness = 1.0
+
+        opened = env.step_command(
+            TeleopCommand(
+                linear_vel_mps=(0.0, 0.0, 0.0),
+                angular_vel_radps=(0.0, 0.0, 0.0),
+                delta_pos_m=(0.0, 0.0, 0.0),
+                delta_rot_rad=(0.0, 0.0, 0.0),
+                enabled=True,
+                frame="link_base",
+                dt=1.0 / 60.0,
+                timestamp=0.0,
+                gripper_intent="open",
+            )
+        )
+        self.assertEqual(opened.target_gripper_closedness, 0.0)
+
+        closed = env.step_command(
+            TeleopCommand(
+                linear_vel_mps=(0.0, 0.0, 0.0),
+                angular_vel_radps=(0.0, 0.0, 0.0),
+                delta_pos_m=(0.0, 0.0, 0.0),
+                delta_rot_rad=(0.0, 0.0, 0.0),
+                enabled=True,
+                frame="link_base",
+                dt=1.0 / 60.0,
+                timestamp=0.0,
+                gripper_intent="close",
+            )
+        )
+        self.assertEqual(closed.target_gripper_closedness, 1.0)
 
     def test_kinematic_gripper_lift_can_raise_cube(self):
         try:

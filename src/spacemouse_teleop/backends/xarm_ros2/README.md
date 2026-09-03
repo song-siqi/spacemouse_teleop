@@ -22,15 +22,18 @@ TeleopCommand.linear_vel_mps + angular_vel_radps
   -> TwistStamped.twist.linear / angular
 ```
 
-The official xArm Gripper should use the backend-neutral normalized closedness
-field:
+The official xArm Gripper backend should use the backend-neutral gripper intent
+field from `TeleopCommand`:
 
 ```text
-TeleopCommand.gripper = 0.0  fully open
-TeleopCommand.gripper = 1.0  fully closed
+TeleopCommand.gripper_intent = open
+TeleopCommand.gripper_intent = close
+TeleopCommand.gripper_intent = hold
 ```
 
-Map that value into the official xArm ROS2 interfaces inside this backend:
+The backend should map `open` and `close` to its controller endpoint targets and
+leave `hold` unchanged, then map the resulting target into the official xArm ROS2
+interfaces:
 
 ```text
 /xarm_gripper/gripper_action position = 0.86 * gripper

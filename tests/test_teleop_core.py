@@ -66,11 +66,10 @@ class TeleopCoreTest(unittest.TestCase):
         self.assertEqual(command.linear_vel_mps, (0.0, 0.0, 0.0))
         self.assertEqual(command.angular_vel_radps, (0.0, 0.0, 0.0))
 
-    def test_gripper_buttons_integrate_closedness_without_motion_modes(self):
+    def test_gripper_buttons_emit_intent_without_motion_modes(self):
         config = TeleopConfig(
             filter_alpha=1.0,
             deadzone=0.0,
-            gripper_speed_per_s=0.5,
         )
         core = TeleopCore(config)
 
@@ -100,8 +99,10 @@ class TeleopCoreTest(unittest.TestCase):
         )
         self.assertNotEqual(closing.linear_vel_mps, (0.0, 0.0, 0.0))
         self.assertNotEqual(closing.angular_vel_radps, (0.0, 0.0, 0.0))
-        self.assertAlmostEqual(closing.delta_gripper, 0.1)
-        self.assertAlmostEqual(closing.gripper, 0.1)
+        self.assertEqual(closing.gripper_intent, "close")
+        self.assertAlmostEqual(closing.delta_gripper, 0.0)
+        self.assertAlmostEqual(closing.gripper_velocity, 0.0)
+        self.assertIsNone(closing.gripper)
 
         opening = core.process(
             RawSpaceMouseState(
@@ -115,8 +116,24 @@ class TeleopCoreTest(unittest.TestCase):
                 timestamp=1.4,
             )
         )
-        self.assertAlmostEqual(opening.delta_gripper, -0.1)
-        self.assertAlmostEqual(opening.gripper, 0.0)
+        self.assertEqual(opening.gripper_intent, "open")
+        self.assertAlmostEqual(opening.delta_gripper, 0.0)
+        self.assertAlmostEqual(opening.gripper_velocity, 0.0)
+        self.assertIsNone(opening.gripper)
+
+        both = core.process(
+            RawSpaceMouseState(
+                x=1.0,
+                y=1.0,
+                z=1.0,
+                roll=1.0,
+                pitch=1.0,
+                yaw=1.0,
+                buttons=(1, 1),
+                timestamp=1.6,
+            )
+        )
+        self.assertEqual(both.gripper_intent, "hold")
 
 
 if __name__ == "__main__":
