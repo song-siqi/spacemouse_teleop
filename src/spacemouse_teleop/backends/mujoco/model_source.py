@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import os
 import math
+import os
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Mapping, Optional, Sequence, Tuple
 
@@ -14,6 +15,7 @@ from spacemouse_teleop.backends.mujoco.constants import (
     GRIPPER_BODY_NAMES,
     GRIPPER_DRIVE_JOINT_NAME,
     GRIPPER_FINGER_MESH_COLLISION_GEOM_NAMES,
+    GRIPPER_GUARD_GEOM_NAMES,
     GRIPPER_JOINT_LIMIT_RAD,
     GRIPPER_JOINT_NAMES,
     GRIPPER_PAD_GEOM_NAMES,
@@ -21,11 +23,11 @@ from spacemouse_teleop.backends.mujoco.constants import (
     JOINT_NAMES,
 )
 
-
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_GENERATED_DIR = REPO_ROOT / ".generated" / "mujoco"
 DEFAULT_ROBOT_DESCRIPTIONS_CACHE = REPO_ROOT / ".robot_descriptions_cache"
 DEFAULT_END_EFFECTOR = END_EFFECTOR_XARM_GRIPPER
+GENERATED_MODEL_VERSION = "3"
 MUJOCO_ASSET_ROOT = Path(__file__).resolve().parent / "assets"
 LOCAL_XARM_ROS2_PATH = MUJOCO_ASSET_ROOT / "xarm_ros2"
 LOCAL_XARM_DESCRIPTION_PATH = LOCAL_XARM_ROS2_PATH / "xarm_description"
@@ -42,13 +44,26 @@ CAMERA_SPECS: Mapping[str, Tuple[Vector3, Vector3, Vector3, float]] = {
     "top": ((0.45, 0.00, 1.80), (0.45, 0.00, 0.72), (1.0, 0.0, 0.0), 34.0),
 }
 
-# Friction values follow the tuned MuJoCo xArm task scene in
-# MingqianW/embodied-ai-xarm (commit 42bf191), while the solver/solref settings
-# below remain slightly stiffer for interactive teleop tabletop contact.
+# The table/object friction scale follows the tuned MuJoCo xArm task scene in
+# MingqianW/embodied-ai-xarm (commit 42bf191). Gripper contacts are tuned by the
+# local manipulation regressions, with stiffer pads and a low-friction guard.
+SCENE_COLLISION_BIT = 1
+GRIPPER_PAD_COLLISION_BIT = 2
+GRIPPER_GUARD_COLLISION_BIT = 4
+MANIPULATION_OBJECT_COLLISION_MASK = (
+    SCENE_COLLISION_BIT | GRIPPER_PAD_COLLISION_BIT | GRIPPER_GUARD_COLLISION_BIT
+)
 TABLE_FRICTION = "1.0 0.01 0.001"
 CUBE_FRICTION = "1.2 0.01 0.001"
-FINGER_MESH_FRICTION = "1.2 0.01 0.001"
-FINGER_PAD_FRICTION = "2.0 0.02 0.002"
+FINGER_PAD_FRICTION = "2.0 0.005 0.0005"
+FINGER_PAD_SOLIMP = "0.95 0.99 0.001"
+FINGER_PAD_SOLREF = "0.003 1"
+GRIPPER_GUARD_FRICTION = "0.2 0.001 0.0001"
+GRIPPER_GUARD_SOLIMP = "0.9 0.95 0.001"
+GRIPPER_GUARD_SOLREF = "0.01 1"
+GRIPPER_ACTUATOR_KP = "20"
+GRIPPER_ACTUATOR_KV = "3"
+GRIPPER_ACTUATOR_FORCE_RANGE = "-4 4"
 
 XARM6_XACRO_ARGS = {
     "add_gripper": "false",
@@ -110,19 +125,44 @@ def ensure_official_xarm6_table_cube_mjcf(
         try:
             _validate_mjcf(output_path, end_effector)
             return output_path
-        except RuntimeError:
+        except (RuntimeError, ValueError):
             pass
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    urdf_path = official_xarm6_urdf_path(end_effector=end_effector)
-    normalized_urdf_path = output_path.with_suffix(".normalized.urdf")
-    raw_mjcf_path = output_path.with_suffix(".raw.xml")
+    with _generation_lock(output_path):
+        if output_path.exists() and not force:
+            try:
+                _validate_mjcf(output_path, end_effector)
+                return output_path
+            except (RuntimeError, ValueError):
+                pass
 
-    _write_normalized_official_urdf(urdf_path, normalized_urdf_path)
-    _save_mjcf_from_urdf(normalized_urdf_path, raw_mjcf_path)
-    _write_table_cube_scene(raw_mjcf_path, output_path, end_effector)
-    _validate_mjcf(output_path, end_effector)
+        urdf_path = official_xarm6_urdf_path(end_effector=end_effector)
+        normalized_urdf_path = output_path.with_suffix(".normalized.urdf")
+        raw_mjcf_path = output_path.with_suffix(".raw.xml")
+
+        _write_normalized_official_urdf(urdf_path, normalized_urdf_path)
+        _save_mjcf_from_urdf(normalized_urdf_path, raw_mjcf_path)
+        _write_table_cube_scene(raw_mjcf_path, output_path, end_effector)
+        _validate_mjcf(output_path, end_effector)
     return output_path
+
+
+@contextmanager
+def _generation_lock(output_path: Path):
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+
+    lock_path = output_path.with_suffix(f"{output_path.suffix}.lock")
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _default_model_name(end_effector: str) -> str:
@@ -207,6 +247,7 @@ def _write_table_cube_scene(
     tree = ET.parse(source_path)
     root = tree.getroot()
     root.set("model", f"xarm6_table_cube_{end_effector}_official_derived")
+    _set_generated_model_version(root)
     _configure_physics_options(root)
 
     worldbody = _required(root.find("worldbody"), "worldbody")
@@ -228,6 +269,7 @@ def _write_table_cube_scene(
                 body.set("gravcomp", "1")
         _tune_gripper_joints(root)
         _configure_gripper_mesh_collisions(root)
+        _add_gripper_guard_collisions(root)
         _add_gripper_pad_collisions(root)
         _add_gripper_mimic_equalities(root)
 
@@ -271,6 +313,8 @@ def _write_table_cube_scene(
             "pos": "0 0 0",
             "size": "2.0 2.0 0.05",
             "rgba": "0.78 0.80 0.83 1",
+            "contype": str(SCENE_COLLISION_BIT),
+            "conaffinity": str(SCENE_COLLISION_BIT),
         },
     )
     ET.SubElement(
@@ -287,6 +331,8 @@ def _write_table_cube_scene(
             "priority": "2",
             "solimp": "0.995 0.999 0.0001",
             "solref": "0.0015 1",
+            "contype": str(SCENE_COLLISION_BIT),
+            "conaffinity": str(SCENE_COLLISION_BIT),
         },
     )
     cube = ET.SubElement(
@@ -312,8 +358,8 @@ def _write_table_cube_scene(
             "priority": "1",
             "solimp": "0.995 0.999 0.0001",
             "solref": "0.0015 1",
-            "contype": "3",
-            "conaffinity": "3",
+            "contype": str(SCENE_COLLISION_BIT),
+            "conaffinity": str(MANIPULATION_OBJECT_COLLISION_MASK),
         },
     )
 
@@ -335,7 +381,9 @@ def _write_table_cube_scene(
         actuator = ET.SubElement(root, "actuator")
     for joint_name in JOINT_NAMES:
         _remove_children_by_name(actuator, "position", f"{joint_name}_pos")
-    for joint_name, (lower, upper) in zip(JOINT_NAMES, JOINT_LIMITS):
+    for joint_name, (lower, upper) in zip(
+        JOINT_NAMES, JOINT_LIMITS, strict=True
+    ):
         ET.SubElement(
             actuator,
             "position",
@@ -358,10 +406,10 @@ def _write_table_cube_scene(
             {
                 "name": GRIPPER_ACTUATOR_NAMES[0],
                 "joint": GRIPPER_DRIVE_JOINT_NAME,
-                "kp": "35",
-                "kv": "5",
+                "kp": GRIPPER_ACTUATOR_KP,
+                "kv": GRIPPER_ACTUATOR_KV,
                 "ctrlrange": f"{lower:.6f} {upper:.6f}",
-                "forcerange": "-18 18",
+                "forcerange": GRIPPER_ACTUATOR_FORCE_RANGE,
             },
         )
 
@@ -370,6 +418,13 @@ def _write_table_cube_scene(
 
 
 def _validate_mjcf(path: Path, end_effector: str) -> None:
+    xml_root = ET.parse(path).getroot()
+    version = xml_root.find(
+        ".//custom/numeric[@name='spacemouse_teleop_model_version']"
+    )
+    if version is None or version.attrib.get("data") != GENERATED_MODEL_VERSION:
+        raise RuntimeError("Generated MuJoCo model has an outdated build version")
+
     mujoco = _require_mujoco()
     model = mujoco.MjModel.from_xml_path(str(path))
     if model.opt.timestep > 0.0011 or model.opt.noslip_iterations < 12:
@@ -396,6 +451,13 @@ def _validate_mjcf(path: Path, end_effector: str) -> None:
             raise RuntimeError(
                 f"Generated MuJoCo model has outdated contact dim on {geom_name}"
             )
+    cube_geom_id = mujoco.mj_name2id(
+        model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom"
+    )
+    if int(model.geom_contype[cube_geom_id]) != SCENE_COLLISION_BIT or int(
+        model.geom_conaffinity[cube_geom_id]
+    ) != MANIPULATION_OBJECT_COLLISION_MASK:
+        raise RuntimeError("Generated MuJoCo model has outdated cube contact mask")
 
     if end_effector == END_EFFECTOR_XARM_GRIPPER:
         missing_gripper_actuators = set(GRIPPER_ACTUATOR_NAMES) - actual_actuators
@@ -403,6 +465,25 @@ def _validate_mjcf(path: Path, end_effector: str) -> None:
             raise RuntimeError(
                 "Generated MuJoCo model is missing xArm gripper actuators: "
                 f"{sorted(missing_gripper_actuators)}"
+            )
+        gripper_actuator_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_ACTUATOR, GRIPPER_ACTUATOR_NAMES[0]
+        )
+        expected_force_range = tuple(
+            float(value) for value in GRIPPER_ACTUATOR_FORCE_RANGE.split()
+        )
+        actual_force_range = tuple(
+            float(value)
+            for value in model.actuator_forcerange[gripper_actuator_id]
+        )
+        if any(
+            abs(actual - expected) > 1e-9
+            for actual, expected in zip(
+                actual_force_range, expected_force_range, strict=True
+            )
+        ):
+            raise RuntimeError(
+                "Generated MuJoCo model has outdated gripper actuator force range"
             )
         missing_gripper_joints = []
         for joint_name in GRIPPER_JOINT_NAMES:
@@ -416,7 +497,9 @@ def _validate_mjcf(path: Path, end_effector: str) -> None:
         if mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "link_tcp") < 0:
             raise RuntimeError("Generated MuJoCo gripper model is missing link_tcp")
         if model.neq < len(GRIPPER_JOINT_NAMES) - 1:
-            raise RuntimeError("Generated MuJoCo gripper mimic equalities are incomplete")
+            raise RuntimeError(
+                "Generated MuJoCo gripper mimic equalities are incomplete"
+            )
         missing_pad_geoms = []
         for geom_name in GRIPPER_PAD_GEOM_NAMES:
             if mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, geom_name) < 0:
@@ -426,24 +509,65 @@ def _validate_mjcf(path: Path, end_effector: str) -> None:
                 "Generated MuJoCo model is missing gripper pad collision geoms: "
                 f"{missing_pad_geoms}"
             )
+        missing_guard_geoms = []
+        for geom_name in GRIPPER_GUARD_GEOM_NAMES:
+            geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, geom_name)
+            if geom_id < 0:
+                missing_guard_geoms.append(geom_name)
+                continue
+            if int(model.geom_contype[geom_id]) != GRIPPER_GUARD_COLLISION_BIT or int(
+                model.geom_conaffinity[geom_id]
+            ) != 0:
+                raise RuntimeError(
+                    "Generated MuJoCo model has outdated gripper guard mask on "
+                    f"{geom_name}"
+                )
+        if missing_guard_geoms:
+            raise RuntimeError(
+                "Generated MuJoCo model is missing gripper guard collision geoms: "
+                f"{missing_guard_geoms}"
+            )
+        palm_geom_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_GEOM, "gripper_palm_collision"
+        )
+        expected_palm_pos = (0.0, 0.0, 0.055)
+        expected_palm_size = (0.040, 0.050)
+        actual_palm_pos = tuple(float(value) for value in model.geom_pos[palm_geom_id])
+        actual_palm_size = tuple(
+            float(value) for value in model.geom_size[palm_geom_id][:2]
+        )
+        if any(
+            abs(actual - expected) > 1e-9
+            for actual, expected in zip(
+                actual_palm_pos, expected_palm_pos, strict=True
+            )
+        ) or any(
+            abs(actual - expected) > 1e-9
+            for actual, expected in zip(
+                actual_palm_size, expected_palm_size, strict=True
+            )
+        ):
+            raise RuntimeError("Generated MuJoCo model has outdated palm guard shape")
         missing_finger_mesh_geoms = []
         for geom_name in GRIPPER_FINGER_MESH_COLLISION_GEOM_NAMES:
             geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, geom_name)
             if geom_id < 0:
                 missing_finger_mesh_geoms.append(geom_name)
-            elif int(model.geom_condim[geom_id]) != 3:
+            elif int(model.geom_contype[geom_id]) != 0 or int(
+                model.geom_conaffinity[geom_id]
+            ) != 0:
                 raise RuntimeError(
-                    "Generated MuJoCo model has outdated contact dim on "
+                    "Generated MuJoCo model has active finger mesh collision on "
                     f"{geom_name}"
                 )
         if missing_finger_mesh_geoms:
             raise RuntimeError(
-                "Generated MuJoCo model is missing active gripper finger mesh "
-                f"collision geoms: {missing_finger_mesh_geoms}"
+                "Generated MuJoCo model is missing named gripper finger mesh "
+                f"geoms: {missing_finger_mesh_geoms}"
             )
         for geom_name in GRIPPER_PAD_GEOM_NAMES:
             geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, geom_name)
-            if geom_id >= 0 and int(model.geom_condim[geom_id]) != 3:
+            if geom_id >= 0 and int(model.geom_condim[geom_id]) != 4:
                 raise RuntimeError(
                     "Generated MuJoCo model has outdated contact dim on "
                     f"{geom_name}"
@@ -535,14 +659,8 @@ def _configure_gripper_mesh_collisions(root: ET.Element) -> None:
             if geom.attrib.get("type") != "mesh" or geom.attrib.get("group") == "1":
                 continue
             geom.set("name", geom_name)
-            geom.set("contype", "2")
-            geom.set("conaffinity", "2")
-            geom.set("friction", FINGER_MESH_FRICTION)
-            geom.set("condim", "3")
-            geom.set("priority", "2")
-            geom.set("solimp", "0.9 0.98 0.001")
-            geom.set("solref", "0.004 1")
-            geom.set("margin", "0.0002")
+            geom.set("contype", "0")
+            geom.set("conaffinity", "0")
             configured = True
             break
         if not configured:
@@ -558,6 +676,80 @@ def _tune_gripper_joints(root: ET.Element) -> None:
         )
         joint.set("damping", "0.08")
         joint.set("armature", "0.0008")
+
+
+def _add_gripper_guard_collisions(root: ET.Element) -> None:
+    specs = (
+        (
+            "xarm_gripper_base_link",
+            "gripper_palm_collision",
+            "cylinder",
+            {"pos": "0 0 0.055", "size": "0.040 0.050"},
+        ),
+        (
+            "left_outer_knuckle",
+            "left_outer_knuckle_guard_collision",
+            "capsule",
+            {"fromto": "0 0.007 -0.014 0 0.033 0.055", "size": "0.007"},
+        ),
+        (
+            "right_outer_knuckle",
+            "right_outer_knuckle_guard_collision",
+            "capsule",
+            {"fromto": "0 -0.007 -0.014 0 -0.033 0.055", "size": "0.007"},
+        ),
+        (
+            "left_finger",
+            "left_finger_guard_collision",
+            "box",
+            {"pos": "0 -0.006 0.027", "size": "0.012 0.006 0.034"},
+        ),
+        (
+            "right_finger",
+            "right_finger_guard_collision",
+            "box",
+            {"pos": "0 0.006 0.027", "size": "0.012 0.006 0.034"},
+        ),
+    )
+    for body_name, geom_name, geom_type, shape in specs:
+        body = _required(
+            root.find(f".//body[@name='{body_name}']"), f"body {body_name}"
+        )
+        _remove_children_by_name(body, "geom", geom_name)
+        attributes = {
+            "name": geom_name,
+            "type": geom_type,
+            "density": "0",
+            "rgba": "0.15 0.55 0.85 0",
+            "contype": str(GRIPPER_GUARD_COLLISION_BIT),
+            "conaffinity": "0",
+            "friction": GRIPPER_GUARD_FRICTION,
+            "condim": "3",
+            "priority": "2",
+            "solimp": GRIPPER_GUARD_SOLIMP,
+            "solref": GRIPPER_GUARD_SOLREF,
+            "margin": "0",
+        }
+        attributes.update(shape)
+        ET.SubElement(body, "geom", attributes)
+
+
+def _set_generated_model_version(root: ET.Element) -> None:
+    custom = root.find("custom")
+    if custom is None:
+        custom = ET.Element("custom")
+        asset = root.find("asset")
+        insert_at = list(root).index(asset) if asset is not None else len(root)
+        root.insert(insert_at, custom)
+    _remove_children_by_name(custom, "numeric", "spacemouse_teleop_model_version")
+    ET.SubElement(
+        custom,
+        "numeric",
+        {
+            "name": "spacemouse_teleop_model_version",
+            "data": GENERATED_MODEL_VERSION,
+        },
+    )
 
 
 def _add_gripper_pad_collisions(root: ET.Element) -> None:
@@ -580,13 +772,13 @@ def _add_gripper_pad_collisions(root: ET.Element) -> None:
                 "size": "0.017 0.006 0.022",
                 "density": "0",
                 "rgba": "0.05 0.65 0.20 0",
-                "contype": "2",
-                "conaffinity": "2",
+                "contype": str(GRIPPER_PAD_COLLISION_BIT),
+                "conaffinity": "0",
                 "friction": FINGER_PAD_FRICTION,
-                "condim": "3",
+                "condim": "4",
                 "priority": "3",
-                "solimp": "0.9 0.98 0.001",
-                "solref": "0.003 1",
+                "solimp": FINGER_PAD_SOLIMP,
+                "solref": FINGER_PAD_SOLREF,
                 "margin": "0.001",
             },
         )

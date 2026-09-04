@@ -3,7 +3,7 @@ name = "spacemouse-teleop"
 version = "0.1.0"
 description = "SpaceMouse teleoperation front-end for xArm6 real robot and MuJoCo simulation backends."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
@@ -23,9 +23,11 @@ spacemouse-diagnose = "spacemouse_teleop.cli.diagnose:main"
 spacemouse-probe = "spacemouse_teleop.cli.probe:main"
 spacemouse-debug = "spacemouse_teleop.cli.debug:main"
 spacemouse-mujoco-diagnose = "spacemouse_teleop.cli.mujoco_diagnose:main"
+spacemouse-mujoco-contact-diagnostics = "spacemouse_teleop.cli.mujoco_contact_diagnostics:main"
 spacemouse-mujoco-gripper-contact-probe = "spacemouse_teleop.cli.mujoco_gripper_contact_probe:main"
 spacemouse-mujoco-gripper-lift-probe = "spacemouse_teleop.cli.mujoco_gripper_lift_probe:main"
 spacemouse-mujoco-gripper-press-probe = "spacemouse_teleop.cli.mujoco_gripper_press_probe:main"
+spacemouse-mujoco-gripper-top-press-probe = "spacemouse_teleop.cli.mujoco_gripper_top_press_probe:main"
 spacemouse-mujoco-response-probe = "spacemouse_teleop.cli.mujoco_response_probe:main"
 spacemouse-mujoco-teleop = "spacemouse_teleop.cli.mujoco_teleop:main"
 

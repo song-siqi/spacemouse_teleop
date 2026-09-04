@@ -9,8 +9,10 @@ import numpy as np
 from spacemouse_teleop.backends.mujoco.constants import (
     END_EFFECTOR_XARM_GRIPPER,
     GRIPPER_ACTUATOR_NAMES,
+    GRIPPER_GUARD_GEOM_NAMES,
     GRIPPER_JOINT_LIMIT_RAD,
     GRIPPER_JOINT_NAMES,
+    GRIPPER_PAD_GEOM_NAMES,
     HOME_QPOS,
     JOINT_NAMES,
 )
@@ -22,12 +24,22 @@ from spacemouse_teleop.backends.mujoco.math_utils import (
 )
 from spacemouse_teleop.backends.mujoco.model_source import (
     DEFAULT_END_EFFECTOR,
+    GRIPPER_GUARD_COLLISION_BIT,
     default_model_path,
 )
 from spacemouse_teleop.spacemouse.command import TeleopCommand
 
-
 Vector = Tuple[float, ...]
+KINEMATIC_LATERAL_GUARD_PENETRATION_LIMIT_M = 0.002
+KINEMATIC_VERTICAL_GUARD_NORMAL_Z_MIN = 0.7
+
+
+@dataclass(frozen=True)
+class _GuardContact:
+    guard_geom_id: int
+    object_geom_id: int
+    distance_m: float
+    normal_z_abs: float
 
 
 @dataclass(frozen=True)
@@ -63,6 +75,7 @@ class XArm6TableCubeEnv:
         arm_control_mode: str = "kinematic",
         ik_position_gain: float = 1.0,
         ik_orientation_gain: float = 0.6,
+        max_ee_angular_speed_radps: Optional[float] = 0.25,
         workspace_min: Sequence[float] = (0.10, -0.45, 0.755),
         workspace_max: Sequence[float] = (0.85, 0.45, 1.25),
     ) -> None:
@@ -81,6 +94,12 @@ class XArm6TableCubeEnv:
         self.control_dt = 1.0 / float(control_hz)
         self.target_mode = target_mode
         self.arm_control_mode = arm_control_mode
+        self.max_ee_angular_speed_radps = (
+            None
+            if max_ee_angular_speed_radps is None
+            or max_ee_angular_speed_radps <= 0.0
+            else float(max_ee_angular_speed_radps)
+        )
         self.workspace_min = np.asarray(workspace_min, dtype=float)
         self.workspace_max = np.asarray(workspace_max, dtype=float)
 
@@ -94,6 +113,16 @@ class XArm6TableCubeEnv:
             raise RuntimeError(f"MuJoCo site not found: {site_name}")
         if self.cube_body_id < 0:
             raise RuntimeError(f"MuJoCo body not found: {cube_body_name}")
+        self.gripper_guard_geom_ids = frozenset(
+            geom_id
+            for geom_id in (
+                self.mujoco.mj_name2id(
+                    self.model, self.mujoco.mjtObj.mjOBJ_GEOM, name
+                )
+                for name in GRIPPER_GUARD_GEOM_NAMES
+            )
+            if geom_id >= 0
+        )
 
         self.joint_ids = np.array(
             [
@@ -156,6 +185,7 @@ class XArm6TableCubeEnv:
         self.target_gripper_closedness = 0.0
         self._last_gripper_command_direction = 0
         self.last_ik_error_norm = 0.0
+        self.last_kinematic_guard_blocked = False
 
     def reset(self, qpos: Sequence[float] = HOME_QPOS) -> MujocoObservation:
         self.mujoco.mj_resetData(self.model, self.data)
@@ -164,6 +194,7 @@ class XArm6TableCubeEnv:
         self.data.ctrl[self.actuator_ids] = self.target_qpos
         self.target_gripper_closedness = 0.0
         self._last_gripper_command_direction = 0
+        self.last_kinematic_guard_blocked = False
         self._set_gripper_qpos_from_target()
         self._apply_gripper_target()
         self.mujoco.mj_forward(self.model, self.data)
@@ -193,7 +224,13 @@ class XArm6TableCubeEnv:
                 self.workspace_min,
                 self.workspace_max,
             )
-            delta_quat = quat_from_rotvec(command.delta_rot_rad)
+            delta_rot = _limit_vector_norm(
+                command.delta_rot_rad,
+                None
+                if self.max_ee_angular_speed_radps is None
+                else self.max_ee_angular_speed_radps * dt,
+            )
+            delta_quat = quat_from_rotvec(delta_rot)
             self.target_quat = quat_multiply(delta_quat, anchor_quat)
 
         if self.has_gripper:
@@ -205,12 +242,17 @@ class XArm6TableCubeEnv:
         self.last_ik_error_norm = result.error_norm
         self.data.ctrl[self.actuator_ids] = self.target_qpos
         if self.arm_control_mode == "kinematic":
-            self._step_kinematic_arm(dt, previous_qpos, self.target_qpos)
-            self.data.qpos[self.qpos_ids] = self.target_qpos
-            self.data.qvel[self.dof_ids] = 0.0
+            applied_qpos, commanded_qvel, guard_blocked = self._step_kinematic_arm(
+                dt, previous_qpos, self.target_qpos
+            )
+            self.last_kinematic_guard_blocked = guard_blocked
+            self.data.qpos[self.qpos_ids] = applied_qpos
+            self.data.qvel[self.dof_ids] = commanded_qvel
+            self.data.ctrl[self.actuator_ids] = applied_qpos
             self._apply_gripper_target()
             self.mujoco.mj_forward(self.model, self.data)
         else:
+            self.last_kinematic_guard_blocked = False
             self._apply_gripper_target()
             self.step_physics(dt)
         return self.observe()
@@ -229,17 +271,92 @@ class XArm6TableCubeEnv:
         dt: float,
         start_qpos: np.ndarray,
         target_qpos: np.ndarray,
-    ) -> None:
+    ) -> Tuple[np.ndarray, np.ndarray, bool]:
         target_dt = self.control_dt if dt <= 0.0 else dt
         nsteps = max(1, int(round(target_dt / float(self.model.opt.timestep))))
         qpos_delta = target_qpos - start_qpos
         qvel = qpos_delta / target_dt
+        zero_qvel = np.zeros_like(qvel)
+        accepted_qpos = np.array(start_qpos, dtype=float)
+        guard_blocked = False
         for index in range(nsteps):
-            alpha = float(index + 1) / float(nsteps)
-            self.data.qpos[self.qpos_ids] = start_qpos + alpha * qpos_delta
-            self.data.qvel[self.dof_ids] = qvel
+            if not guard_blocked:
+                self.data.qpos[self.qpos_ids] = accepted_qpos
+                self.data.qvel[self.dof_ids] = qvel
+                self.data.ctrl[self.actuator_ids] = accepted_qpos
+                self._apply_gripper_target()
+                self.mujoco.mj_forward(self.model, self.data)
+                previous_contacts = self._guard_object_contacts()
+
+                alpha = float(index + 1) / float(nsteps)
+                candidate_qpos = start_qpos + alpha * qpos_delta
+                self.data.qpos[self.qpos_ids] = candidate_qpos
+                self.data.qvel[self.dof_ids] = qvel
+                self.data.ctrl[self.actuator_ids] = candidate_qpos
+                self._apply_gripper_target()
+                self.mujoco.mj_forward(self.model, self.data)
+                candidate_contacts = self._guard_object_contacts()
+                guard_blocked = _has_blocking_guard_penetration(
+                    previous_contacts, candidate_contacts
+                )
+                if not guard_blocked:
+                    accepted_qpos = candidate_qpos
+
+            if guard_blocked:
+                self.data.qpos[self.qpos_ids] = accepted_qpos
+                self.data.qvel[self.dof_ids] = zero_qvel
+                self.data.ctrl[self.actuator_ids] = accepted_qpos
+            else:
+                self.data.qpos[self.qpos_ids] = accepted_qpos
+                self.data.qvel[self.dof_ids] = qvel
+                self.data.ctrl[self.actuator_ids] = accepted_qpos
             self._apply_gripper_target()
             self.mujoco.mj_step(self.model, self.data)
+        return accepted_qpos, zero_qvel if guard_blocked else qvel, guard_blocked
+
+    def _guard_object_contacts(self) -> Tuple[_GuardContact, ...]:
+        if not self.gripper_guard_geom_ids:
+            return ()
+        contacts = []
+        for index in range(self.data.ncon):
+            contact = self.data.contact[index]
+            geom_ids = (int(contact.geom1), int(contact.geom2))
+            guard_geom_ids = set(geom_ids).intersection(
+                self.gripper_guard_geom_ids
+            )
+            if not guard_geom_ids:
+                continue
+            guard_geom_id = next(iter(guard_geom_ids))
+            object_geom_id = (
+                geom_ids[1] if geom_ids[0] == guard_geom_id else geom_ids[0]
+            )
+            if not (
+                int(self.model.geom_conaffinity[object_geom_id])
+                & GRIPPER_GUARD_COLLISION_BIT
+            ):
+                continue
+            contacts.append(
+                _GuardContact(
+                    guard_geom_id=guard_geom_id,
+                    object_geom_id=object_geom_id,
+                    distance_m=float(contact.dist),
+                    normal_z_abs=abs(float(contact.frame[2])),
+                )
+            )
+        return tuple(contacts)
+
+    def set_gripper_collision_debug(self, enabled: bool) -> None:
+        alpha = 0.35 if enabled else 0.0
+        for geom_names, rgb in (
+            (GRIPPER_PAD_GEOM_NAMES, (0.05, 0.65, 0.20)),
+            (GRIPPER_GUARD_GEOM_NAMES, (0.15, 0.55, 0.85)),
+        ):
+            for geom_name in geom_names:
+                geom_id = self.mujoco.mj_name2id(
+                    self.model, self.mujoco.mjtObj.mjOBJ_GEOM, geom_name
+                )
+                if geom_id >= 0:
+                    self.model.geom_rgba[geom_id] = (*rgb, alpha)
 
     def observe(self) -> MujocoObservation:
         ee_quat = self._site_quat()
@@ -331,6 +448,49 @@ class XArm6TableCubeEnv:
 
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
+
+
+def _limit_vector_norm(
+    vector: Sequence[float], limit: Optional[float]
+) -> np.ndarray:
+    value = np.asarray(vector, dtype=float)
+    if limit is None or limit <= 0.0:
+        return value
+    norm = float(np.linalg.norm(value))
+    if norm <= limit or norm <= 1e-12:
+        return value
+    return value * (limit / norm)
+
+
+def _has_blocking_guard_penetration(
+    previous_contacts: Sequence[_GuardContact],
+    candidate_contacts: Sequence[_GuardContact],
+) -> bool:
+    previous_distances = {}
+    for contact in previous_contacts:
+        contact_key = (contact.guard_geom_id, contact.object_geom_id)
+        previous_distances[contact_key] = min(
+            previous_distances.get(contact_key, float("inf")),
+            contact.distance_m,
+        )
+
+    for contact in candidate_contacts:
+        penetration_limit = (
+            0.0
+            if contact.normal_z_abs >= KINEMATIC_VERTICAL_GUARD_NORMAL_Z_MIN
+            else KINEMATIC_LATERAL_GUARD_PENETRATION_LIMIT_M
+        )
+        if contact.distance_m >= -penetration_limit:
+            continue
+        previous_distance = previous_distances.get(
+            (contact.guard_geom_id, contact.object_geom_id)
+        )
+        if (
+            previous_distance is None
+            or contact.distance_m < previous_distance - 1e-7
+        ):
+            return True
+    return False
 
 
 def _require_mujoco():

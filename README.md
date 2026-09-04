@@ -135,23 +135,39 @@ python scripts/spacemouse_probe.py --backend pyspacemouse --device SpaceMouseCom
 
 ## MuJoCo Prototype
 
-Install the simulator dependencies:
+The simulator and all automated physics checks can run without a SpaceMouse or
+the hardware Python dependencies. Create a Python 3.10+ environment and install
+only the simulator extra:
 
 ```bash
 cd /Users/song-siqi/Projects/spacemouse_teleop
+UV_CACHE_DIR=.uv-cache uv venv --python 3.12
 source .venv/bin/activate
-UV_CACHE_DIR=.uv-cache uv pip install -e '.[sim,hardware]'
+UV_CACHE_DIR=.uv-cache uv pip install -e '.[sim]'
 ```
 
-Headless smoke test with mock SpaceMouse input:
+Run the complete hardware-free test suite:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+These tests use synthetic `TeleopCommand` values and mocked reader objects. They
+do not open HID devices or require a connected SpaceMouse. The MuJoCo coverage
+includes grasp, lift, hold, rotation, top contact, lateral push and retreat,
+renamed box/cylinder objects, `30/60/120 Hz`, and actuator-mode stability.
+
+Run a headless teleop smoke test with mock SpaceMouse input:
 
 ```bash
 SPACEMOUSE_TELEOP_BACKEND=mock SPACEMOUSE_TELEOP_VIEWER=0 ./scripts/run_mujoco_spacemouse.sh --duration 5
 ```
 
-Real SpaceMouse teleop with the MuJoCo viewer:
+For real SpaceMouse input, additionally install the hardware extra, then launch
+the MuJoCo viewer:
 
 ```bash
+UV_CACHE_DIR=.uv-cache uv pip install -e '.[hardware]'
 ./scripts/run_mujoco_spacemouse.sh
 ```
 
@@ -205,39 +221,76 @@ compare against the previous bare-arm scene, pass:
 python scripts/mujoco_teleop.py --backend mock --end-effector none --list-cameras
 ```
 
-For cube interaction, the generated gripper keeps the official mesh for visual
-appearance. The base and knuckle mesh collisions are disabled to avoid
-outer-shell popping, but the visible distal finger collision meshes are active
-as `left_finger_mesh_collision` and `right_finger_mesh_collision`. Two
-transparent fingertip pad boxes named `left_finger_pad_collision` and
-`right_finger_pad_collision` remain as high-friction contact helpers, and the
-non-drive gripper joints are tied to `drive_joint` with MuJoCo equality
-constraints. Finger and pad contacts are masked to interact with the cube but
-not the tabletop, which keeps low grasp attempts from being blocked by the
-finger shell touching the table first. The `eef` marker is hidden in the viewer
-and placed at the grasp center so it does not contact or visually occlude the
-cube.
+For manipulation-object interaction, the generated gripper keeps the official
+mesh for visual appearance but disables its complex mesh collision. Two
+transparent boxes named
+`left_finger_pad_collision` and `right_finger_pad_collision` provide the
+high-friction fingertip grasp surfaces. Separate low-friction primitive guards
+cover the palm, outer knuckles, and finger backs so the visible shell cannot pass
+through manipulated objects. Scene, pad, and guard geoms use collision bits
+`1`, `2`, and `4`; a dynamic object opts into all three with `contype=1` and
+`conaffinity=7`. Pads and guards use zero affinity, so they do not collide with
+one another, themselves, or the tabletop. This keeps shell protection from
+competing with the grasp contacts. The non-drive gripper joints remain tied to
+`drive_joint` with MuJoCo equality constraints. The `eef` marker is hidden in
+the viewer and placed at the grasp center so it does not contact or visually
+occlude the object.
 
-The generated scene uses friction values adapted from the tuned
-`MingqianW/embodied-ai-xarm` MuJoCo task scene: table `1.0 0.01 0.001`, cube
-`1.2 0.01 0.001`, distal finger meshes `1.2 0.01 0.001`, and fingertip pads
-`2.0 0.02 0.002`. It keeps our stiffer tabletop contact solver
+The official linkage has substantial mechanical advantage, so its MuJoCo
+position actuator is intentionally force-limited to `-4 4` with `kp=20` and
+`kv=3`. This keeps a held object constrained without maintaining unrealistically
+large fingertip forces after the close command.
+
+The table/object friction scale is adapted from the tuned
+`MingqianW/embodied-ai-xarm` MuJoCo task scene: table `1.0 0.01 0.001` and cube
+`1.2 0.01 0.001`. Local manipulation regressions use fingertip pads
+`2.0 0.005 0.0005` and outer guards `0.2 0.001 0.0001`. The scene keeps our
+stiffer tabletop contact solver
 (`timestep=0.001`, Newton solver, extra no-slip iterations, stiff table/cube
-`solref`/`solimp`) to reduce visible tabletop penetration. Gripper contacts use
-`condim=3`, so the pinch relies on sliding friction without extra
-torsional/rolling friction that can make the cube feel glued to the fingers.
+`solref`/`solimp`) to reduce visible tabletop penetration. Pad geoms directly
+use `condim=4`, `solref="0.003 1"`, and `solimp="0.95 0.99 0.001"`, so the same
+grasp behavior applies to every correctly masked object without a name-specific
+contact pair. Guards use `condim=3` and softer contact settings for low-friction
+pushing. Their priority is higher than an opted-in object's priority so MuJoCo
+uses the guard friction instead of taking the larger object coefficient. Table
+contacts keep their existing settings so grasp behavior can be compared without
+changing the rest of the scene at once.
 
 In kinematic arm mode, MuJoCo receives interpolated joint positions plus the
 matching joint velocities. This lets contact friction see that the gripper is
-moving upward, which is required for lifting a pinched cube instead of simply
-sliding past it.
+moving upward, which is required for lifting a pinched object instead of simply
+sliding past it. Before accepting each interpolated pose, the backend also
+checks every guard contact whose counterpart opts into the guard collision bit.
+A contact with `|normal_z| >= 0.7` that would deepen penetration is held at the
+last valid pose. Other contacts allow up to `2 mm` of compliant guard compression
+so they can transmit a pushing force, then apply the same limit if the object
+cannot keep up. Retreating motion and any motion that reduces penetration remain
+available. This extra check is needed because a directly written kinematic arm
+cannot otherwise be stopped by contact forces.
 
-Probe gripper/cube contact without the SpaceMouse:
+Probe gripper/object contact without the SpaceMouse:
 
 ```bash
+python scripts/mujoco_contact_diagnostics.py --log logs/mujoco_contact_baseline.jsonl
 python scripts/mujoco_gripper_contact_probe.py
 python scripts/mujoco_gripper_lift_probe.py
 python scripts/mujoco_gripper_press_probe.py
+python scripts/mujoco_gripper_top_press_probe.py
+```
+
+`mujoco_gripper_top_press_probe.py` reproduces an open-gripper approach from
+above and verifies both shell/cube and cube/table penetration limits.
+
+`mujoco_contact_diagnostics.py` runs approach, close, lift, tool-axis rotation,
+hold, outer-shell push, and retreat phases. Its per-phase report splits contact
+fraction, force, torque, and penetration into left pad, right pad, guard, and
+table roles. Use `--object-body` and repeatable `--object-geom` options for
+models that do not call the manipulated body `cube`.
+
+Show the otherwise hidden pad and guard primitives in the viewer:
+
+```bash
+SPACEMOUSE_TELEOP_SHOW_COLLISION_GEOMS=1 ./scripts/run_mujoco_spacemouse.sh
 ```
 
 The generated arm and gripper bodies use MuJoCo `gravcomp=1`, so a zero-command hold test behaves like a powered xArm servo stack instead of an unpowered arm sagging under gravity.
@@ -276,6 +329,12 @@ responsive teleop; `--arm-control-mode actuator` keeps the softer MuJoCo
 position-actuator dynamics for experiments that need them.
 MuJoCo also exposes `--position-gain` and `--orientation-gain` so translation and
 rotation can be weighted independently in the IK controller.
+The backend additionally limits EE target rotation to `0.25 rad/s` by default;
+with the default orientation gain this keeps grasped-cube rotation inside the
+stable contact range. Override it with `--max-ee-angular-speed`, or set
+`SPACEMOUSE_TELEOP_MAX_EE_ANGULAR_SPEED=0` in the launcher environment to
+disable the limit. This is a MuJoCo controller policy: the SpaceMouse command
+format and the real-robot backend remain unchanged.
 
 ## Current Command Contract
 

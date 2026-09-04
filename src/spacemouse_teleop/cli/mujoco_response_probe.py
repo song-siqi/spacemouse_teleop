@@ -41,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--position-gain", type=float, default=0.6)
     parser.add_argument("--orientation-gain", type=float, default=0.35)
+    parser.add_argument("--max-ee-angular-speed", type=float, default=0.25)
     parser.add_argument("--model", default=None, help="Optional MuJoCo XML model path.")
     parser.add_argument(
         "--end-effector",
@@ -70,6 +71,7 @@ def _main() -> None:
         arm_control_mode=args.arm_control_mode,
         ik_position_gain=args.position_gain,
         ik_orientation_gain=args.orientation_gain,
+        max_ee_angular_speed_radps=args.max_ee_angular_speed,
     )
     initial = env.reset()
 
@@ -95,7 +97,10 @@ def _main() -> None:
         f"hz={args.hz:0.1f}"
     )
     print(f"command_linear={format_vec(linear)} command_angular={format_vec(angular)}")
-    print(f"move_duration_s={args.move_duration:0.3f} hold_duration_s={args.hold_duration:0.3f}")
+    print(
+        f"move_duration_s={args.move_duration:0.3f} "
+        f"hold_duration_s={args.hold_duration:0.3f}"
+    )
     print(f"initial_ee={format_vec(initial.ee_pos)}")
     print(f"stop_start_ee={format_vec(stop_start.ee_pos)}")
     print(f"final_ee={format_vec(final.ee_pos)}")

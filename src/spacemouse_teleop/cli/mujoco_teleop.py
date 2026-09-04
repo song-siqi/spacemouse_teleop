@@ -13,6 +13,10 @@ from spacemouse_teleop.backends.mujoco import (
     END_EFFECTOR_NAMES,
     XArm6TableCubeEnv,
 )
+from spacemouse_teleop.backends.mujoco.multiview import (
+    DEFAULT_MULTIVIEW_CAMERAS,
+    ViewerCameraOverlay,
+)
 from spacemouse_teleop.cli.common import (
     LoopRate,
     add_reader_args,
@@ -23,10 +27,6 @@ from spacemouse_teleop.cli.common import (
 from spacemouse_teleop.recording import JsonlRecorder
 from spacemouse_teleop.spacemouse import TeleopCore
 from spacemouse_teleop.spacemouse.readers import make_reader
-from spacemouse_teleop.backends.mujoco.multiview import (
-    DEFAULT_MULTIVIEW_CAMERAS,
-    ViewerCameraOverlay,
-)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,6 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--viewer",
         action="store_true",
         help="Open the MuJoCo passive viewer.",
+    )
+    parser.add_argument(
+        "--show-collision-geoms",
+        action="store_true",
+        help="Show translucent gripper pad and shell collision geoms.",
     )
     parser.add_argument(
         "--camera",
@@ -108,7 +113,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="velocity",
         help=(
             "MuJoCo EE target semantics. 'velocity' applies each command delta "
-            "from the observed EE pose; 'integrated' accumulates a persistent EE target."
+            "from the observed EE pose; 'integrated' accumulates a persistent "
+            "EE target."
         ),
     )
     parser.add_argument(
@@ -133,6 +139,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Controller weight for rotational EE error in the MuJoCo IK step.",
     )
     parser.add_argument(
+        "--max-ee-angular-speed",
+        type=float,
+        default=0.25,
+        help=(
+            "MuJoCo EE target rotation limit in rad/s. Use 0 to disable the limit."
+        ),
+    )
+    parser.add_argument(
         "--log",
         default=None,
         help="Optional JSONL path for raw command and MuJoCo observations.",
@@ -154,6 +168,8 @@ def _main() -> None:
     args = build_parser().parse_args()
     if args.multiview and not args.viewer:
         raise RuntimeError("--multiview requires --viewer")
+    if args.show_collision_geoms and not args.viewer:
+        raise RuntimeError("--show-collision-geoms requires --viewer")
 
     config = load_config(args.config)
     core = TeleopCore(config)
@@ -165,8 +181,10 @@ def _main() -> None:
         arm_control_mode=args.arm_control_mode,
         ik_position_gain=args.position_gain,
         ik_orientation_gain=args.orientation_gain,
+        max_ee_angular_speed_radps=args.max_ee_angular_speed,
     )
     observation = env.reset()
+    env.set_gripper_collision_debug(args.show_collision_geoms)
     if args.list_cameras:
         print("available cameras: " + ", ".join(_camera_names(env)))
         return
@@ -223,6 +241,9 @@ def _main() -> None:
                             "controller": {
                                 "position_gain": args.position_gain,
                                 "orientation_gain": args.orientation_gain,
+                                "max_ee_angular_speed_radps": (
+                                    args.max_ee_angular_speed
+                                ),
                             },
                             "end_effector": args.end_effector,
                         },

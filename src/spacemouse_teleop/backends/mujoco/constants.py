@@ -45,6 +45,13 @@ GRIPPER_FINGER_MESH_COLLISION_GEOM_NAMES: Tuple[str, ...] = (
     "left_finger_mesh_collision",
     "right_finger_mesh_collision",
 )
+GRIPPER_GUARD_GEOM_NAMES: Tuple[str, ...] = (
+    "gripper_palm_collision",
+    "left_outer_knuckle_guard_collision",
+    "right_outer_knuckle_guard_collision",
+    "left_finger_guard_collision",
+    "right_finger_guard_collision",
+)
 GRIPPER_JOINT_LIMIT_RAD: Tuple[float, float] = (0.0, 0.85)
 GRIPPER_ACTION_LIMIT_RAD: Tuple[float, float] = (0.0, 0.86)
 GRIPPER_SERVICE_PULSE_RANGE: Tuple[float, float] = (0.0, 850.0)

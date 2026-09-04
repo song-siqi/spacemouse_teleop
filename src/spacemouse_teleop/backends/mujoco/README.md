@@ -82,28 +82,46 @@ the lower-bandwidth MuJoCo position actuators themselves.
 The controller exposes separate translational and rotational weights:
 `--position-gain` and `--orientation-gain`. Lower them when the SpaceMouse feels
 too aggressive without changing the device-to-command mapping.
+The MuJoCo backend also limits EE target rotation to `0.25 rad/s` by default.
+This keeps the kinematic controller inside the stable grasp-contact range while
+leaving the shared SpaceMouse command unchanged. Pass
+`--max-ee-angular-speed 0` to disable the limit for stress tests.
 
-For gripper/cube contact, the generated model disables the base and knuckle
-mesh collisions but keeps the distal finger mesh collisions active under
-`left_finger_mesh_collision` and `right_finger_mesh_collision`. Invisible
-fingertip pad boxes add stable high-friction contact without showing separate
-green collision geometry in the viewer. Finger and pad collisions are masked to
-interact with the cube but not the table, while the cube still collides with the
-table as usual.
+For gripper/object contact, the generated model keeps the official gripper mesh
+for rendering but disables its complex mesh collision. Invisible fingertip pad
+boxes provide the high-friction grasp surfaces. Low-friction primitive guards
+cover the palm, outer knuckles, and finger backs so those visible surfaces do
+not pass through manipulated objects. Scene, pad, and guard geoms use collision
+bits `1`, `2`, and `4`; a dynamic manipulation object opts into all three with
+`contype=1` and `conaffinity=7`. Pad and guard affinity is zero, so they do not
+collide with themselves, one another, or the table.
 
-The generated model borrows the friction scale from
-`MingqianW/embodied-ai-xarm`: table `1.0 0.01 0.001`, cube
-`1.2 0.01 0.001`, distal finger meshes `1.2 0.01 0.001`, and fingertip pads
-`2.0 0.02 0.002`. It keeps our smaller MuJoCo timestep, Newton solver, no-slip
+The generated model borrows the table/object friction scale from
+`MingqianW/embodied-ai-xarm`: table `1.0 0.01 0.001` and cube
+`1.2 0.01 0.001`. Local manipulation regressions use fingertip pads
+`2.0 0.005 0.0005` and guards `0.2 0.001 0.0001`. The scene keeps our smaller
+MuJoCo timestep, Newton solver, no-slip
 iterations, and stiff table/cube `solref`/`solimp` values to reduce visible
-tabletop penetration. Gripper contacts use `condim=3` so they provide pinch
-friction without torsional or rolling constraints that can feel like artificial
-glue.
+tabletop penetration. The pad geoms themselves use `condim=4`,
+`solref="0.003 1"`, and `solimp="0.95 0.99 0.001"`; no object-name-specific
+contact pair is required. Guards use `condim=3`, `solref="0.01 1"`, and
+`solimp="0.9 0.95 0.001"` for softer low-friction push contact. Guard priority
+is `2` versus the object's `1`, ensuring these guard parameters win MuJoCo's
+dynamic contact-pair combination; pads remain at priority `3`.
+
+The official gripper linkage is driven with `kp=20`, `kv=3`, and a `-4 4`
+actuator force range. This is enough to lift the cube without the very large
+residual pinch forces produced by the untuned linkage.
 
 Kinematic arm execution still writes the arm pose directly for responsive
 teleop, but it now interpolates those writes across MuJoCo substeps and provides
-the corresponding joint velocities. This gives the contact solver the tangential
-motion it needs for frictional lift tests.
+the corresponding joint velocities. This gives the contact solver the
+tangential motion it needs for frictional lift tests. Each candidate substep is
+also checked for contact between a guard and any geom that accepts collision bit
+`4`. A contact with `|normal_z| >= 0.7` stops at the previous valid arm pose when
+penetration would deepen. Other contacts may compress the guard by up to `2 mm`,
+allowing the gripper to push a free object across the tabletop without permitting
+unbounded overlap. Motion away from contact remains accepted.
 
 The generated scene has several fixed cameras. Start with a chosen view:
 
@@ -118,10 +136,48 @@ SPACEMOUSE_TELEOP_MULTIVIEW=1 ./scripts/run_mujoco_spacemouse.sh
 SPACEMOUSE_TELEOP_MULTIVIEW_CAMERAS=overview,front,side,top SPACEMOUSE_TELEOP_MULTIVIEW_LAYOUT=grid ./scripts/run_mujoco_spacemouse.sh
 ```
 
+Show the pad primitives in translucent green and guard primitives in blue:
+
+```bash
+SPACEMOUSE_TELEOP_SHOW_COLLISION_GEOMS=1 ./scripts/run_mujoco_spacemouse.sh
+```
+
 To debug the model independently from SpaceMouse input:
 
 ```bash
 python scripts/mujoco_diagnose.py --force-regenerate --duration 5
+python scripts/mujoco_contact_diagnostics.py --log logs/mujoco_contact.jsonl
+python scripts/mujoco_contact_diagnostics.py --model custom.xml --object-body payload --object-geom payload_collision
+python scripts/mujoco_gripper_top_press_probe.py
 python scripts/mujoco_response_probe.py --target-mode velocity --arm-control-mode kinematic --position-gain 0.6 --orientation-gain 0.35
 python scripts/mujoco_response_probe.py --target-mode integrated --arm-control-mode actuator
 ```
+
+Run the complete simulation regression suite without a physical SpaceMouse:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The tests feed synthetic commands directly to the backend; reader coverage is
+mocked and does not open a HID device.
+
+## Physics Regression Contract
+
+The automated suite treats the following limits as the baseline contract for
+future geometry or contact tuning:
+
+- A `120 mm` EE lift raises the object by at least `80 mm`, with both pads in
+  sustained contact.
+- A grasp held in free space for `2 s` drifts by less than `5 mm` and `5 deg`.
+- Grasp rotation stays within `10 deg` of the EE, below `2 mm` penetration and
+  `80 N` peak normal force.
+- A top guard contact stays below `0.5 mm` penetration; object/table penetration
+  stays below `2 mm`, and retreat remains possible.
+- A lateral guard push moves the object by at least `40 mm`, stays below
+  `2.5 mm` penetration, releases on retreat, and drags the object less than
+  `5 mm` afterward.
+- Renamed box and cylinder bodies exercise the same guard behavior, proving the
+  kinematic constraint is selected by collision mask rather than geom name.
+- Critical kinematic scenarios run at `30`, `60`, and `120 Hz`; actuator mode
+  is checked for finite state, bounded velocity, and at most `3 mm` penetration.
