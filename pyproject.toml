@@ -9,8 +9,9 @@ dependencies = []
 [project.optional-dependencies]
 hardware = [
     "hidapi>=0.15.0",
-    "pyspacemouse>=2.1.0",
+    "pyspacemouse==2.1.0",
 ]
+xarm = ["xarm-python-sdk==1.18.4"]
 sim = [
     "mujoco>=3.2.0",
     "numpy>=1.24.0",
@@ -19,6 +20,8 @@ sim = [
 ]
 
 [project.scripts]
+spacemouse-xarm-diagnose = "spacemouse_teleop.cli.xarm_diagnose:main"
+spacemouse-xarm-teleop = "spacemouse_teleop.cli.xarm_teleop:main"
 spacemouse-diagnose = "spacemouse_teleop.cli.diagnose:main"
 spacemouse-probe = "spacemouse_teleop.cli.probe:main"
 spacemouse-debug = "spacemouse_teleop.cli.debug:main"

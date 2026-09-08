@@ -1,0 +1,28 @@
+# Ubuntu 20.04 x86_64 / Python 3.12.14, verified 2026-09-08.
+# Constraints for reproducing this machine; install the project separately.
+absl-py==2.5.0
+catkin-pkg==1.1.0
+distro==1.9.0
+docutils==0.23
+etils==1.14.0
+fsspec==2026.7.0
+gitdb==4.0.12
+gitpython==3.1.62
+glfw==2.10.2
+mujoco==3.12.0
+numpy==2.5.3
+packaging==26.3
+pyopengl==3.1.10
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+pyyaml==6.0.3
+robot-descriptions==3.1.0
+rospkg==1.6.2
+setuptools==84.0.0
+six==1.17.0
+smmap==5.0.3
+tqdm==4.70.0
+typing-extensions==4.16.0
+xacro==2.1.1
+xacrodoc==2.0.1
+zipp==4.1.0

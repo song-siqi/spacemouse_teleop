@@ -1,19 +1,27 @@
 # SpaceMouse Teleop
 
+The basic SpaceMouse -> `TeleopCommand` -> real xArm6 + official gripper demo
+has been verified on hardware, including automatic gripper opening before reset.
+Full tool commissioning and fault-stop validation remain open. See
+[PROGRESS_PLAN.md](PROGRESS_PLAN.md) for current evidence, agreed behavior and
+next-stage discussion. The existing MuJoCo pipeline remains separate; additional
+simulation checks are paused at the user's request.
+
 This repo is organized around one reusable SpaceMouse command layer and separate execution backends for the real xArm6 stack and MuJoCo.
 
 ```text
 SpaceMouse device
   -> src/spacemouse_teleop/spacemouse
   -> TeleopCommand
-  -> src/spacemouse_teleop/backends/xarm_ros2
-  -> src/spacemouse_teleop/backends/mujoco
+  -> backends/xarm_sdk     real xArm6 (basic hardware demo verified)
+  -> backends/mujoco       existing simulator
+  -> backends/xarm_ros2    future ROS2 adapter/reference
 ```
 
 Top-level layout:
 
 ```text
-configs/                         shared launch/runtime config
+configs/                         independent real/demo/simulation configs
 scripts/                         direct debug entrypoints
 src/spacemouse_teleop/spacemouse SpaceMouse reader, mapping, filters, command contract
 src/spacemouse_teleop/backends   execution adapters, one subdirectory per backend
@@ -37,7 +45,190 @@ If the directory is missing, recreate the local reference with:
 git clone https://github.com/xArm-Developer/xarm_ros2.git third_party/xarm_ros2
 ```
 
-For the real robot path, the xArm ROS2 controller updates at `150 Hz` and the hardware backend ultimately sends joint position commands through the SDK call `set_servo_angle_j`. The MuJoCo backend follows the same high-level split: SpaceMouse emits Cartesian EE commands, while the backend converts them into joint position targets.
+For the ROS2 reference path, the xArm ROS2 controller updates at `150 Hz` and the hardware backend ultimately sends joint position commands through the SDK call `set_servo_angle_j`. The MuJoCo backend follows the same high-level split: SpaceMouse emits Cartesian EE commands, while the backend converts them into joint position targets.
+
+## Real xArm6 on Ubuntu (SDK)
+
+The basic real-robot demo is working. On 2026-09-08 the user verified the full
+sequence: automatic gripper opening, joint reset, SpaceMouse teleop, gripper
+control, and normal exit. The latest run recorded 3405 arm commands over 56.73 s
+at approximately 60 Hz, with no reported arm/gripper errors. The last automated
+run passed 93 real-backend/input tests. Tool calibration, simultaneous arm/gripper
+motion, and physical fault-stop measurements remain open. See
+[the progress plan](PROGRESS_PLAN.md) for the next discussion and
+[the validation record](docs/xarm_sdk_validation.md) for dated evidence.
+
+### Run the verified demo
+
+Use the project environment and the independent demo configuration:
+
+```bash
+cd /home/siqis3/workspace/spacemouse_teleop
+./scripts/run_xarm_demo.sh               # default: 60 s after reset, including neutral wait
+./scripts/run_xarm_demo.sh --duration 0  # no session time limit; Ctrl-C exits
+```
+
+Run one command at a time. Every live reset opens the gripper first, releasing
+anything held from the previous trajectory, then returns the arm to its initial
+joints. The startup sequence is:
+
+1. Connect and check robot status, tool configuration, and input health.
+2. Open the gripper and confirm its measured position, target and stopped state.
+3. Reset the arm to `[0, -60, -30, 0, 90, 0]` degrees and confirm it has settled.
+4. Wait for the SpaceMouse knob to be centered and both buttons released, then
+   start teleop automatically, without an extra enable button.
+
+If the device starts completely idle with no HID report, briefly move and release
+the knob once. During teleop, centering the knob immediately clears the arm
+velocity command. Hold button 0 to open the gripper; hold button 1 to close it.
+Release or hold both buttons to hold its current position. The same held direction
+sends its endpoint once; release or reversal replaces that target without waiting
+for the old endpoint. Exit attempts a current-position hold and does not
+intentionally open the gripper. The next reset is what opens it automatically.
+
+Each run keeps a separate JSONL log, and `logs/xarm_demo_latest.jsonl` points to
+the latest run. Full operating details are in [the demo guide](docs/xarm_demo_setup.md).
+
+### Current demo parameters
+
+| Setting | Value |
+| --- | --- |
+| Robot / input | xArm6 at `192.168.1.209`; SpaceMouse Compact, ROS axis convention |
+| Arm translation / rotation limits | 30 mm/s / 0.15 rad/s |
+| Arm acceleration limits | 50 mm/s² / 0.2 rad/s² |
+| Additional software TCP position box | Disabled explicitly in the demo |
+| Gripper endpoints / device speed | Open 850, close 230 pulse; SDK speed parameter 1000 |
+| Startup gripper opening | Timeout 10 s; tolerance 15 pulse; stopped for 0.2 s |
+| Joint reset | 0.1 rad/s, 0.2 rad/s²; tolerance 0.005 rad; settled for 0.3 s; timeout 120 s |
+| Arm / HID / gripper polling | 60 / 250 / 20 Hz |
+| Input / arm feedback timeout | 0.25 s |
+| Maximum arm velocity command duration | 0.2 s |
+| Demo session duration | 60 s by default; `--duration 0` removes only this session limit |
+
+The opening, joint-reset and teleop timers are separate: the 120 s reset timer
+starts after opening is confirmed; the teleop timer starts after joint reset.
+An opening failure prevents joint motion. A reset failure prevents teleop.
+
+The tactile sensor on the fingers prevents full closure to 0. The demo's close
+limit of 230 is provisional and still needs calibration to the installation;
+it is not a force limit. The `speed_pulse_s` field is passed unchanged to the
+SDK speed register; despite the legacy field name, SDK 1.18.4 documents its speed
+argument in r/min. Speed 1000 has now been used in real runs.
+
+The demo uses TCP offset `[0,0,0,0,0,0]` and payload/center of mass `[0.82,0,0,0]`
+from the trial setup. Zero TCP offset means the commanded point is the flange,
+not the tactile contact surface. Formal tool calibration remains unfinished.
+The demo has no additional software TCP box; speed, feedback and tool checks
+still apply. The reset does not perform scene collision-path planning.
+
+### Configuration ownership
+
+| Entry point | Configuration |
+| --- | --- |
+| `scripts/run_xarm_demo.sh` | `configs/spacemouse_xarm6_demo.json` |
+| SDK teleop / diagnosis default | `configs/spacemouse_xarm6_real.json` |
+| MuJoCo shell launcher | `configs/spacemouse_xarm6_mujoco.json` |
+| Direct MuJoCo CLI / generic debug default | `configs/spacemouse_xarm6.json` |
+
+Each real JSON declares its own `teleop`, `reader`, `robot`, `gripper` and `site`
+sections. It does not inherit or merge another config or read the simulation
+launcher's `SPACEMOUSE_TELEOP_CONFIG`. `--config` selects a complete real config;
+`--ip` overrides its robot IP. Simulation loaders reject the nested real config.
+The existing two simulation defaults are preserved. Default paths are resolved
+relative to the editable checkout, independently of the terminal directory.
+
+The formal real template still has unconfirmed site settings set to `null` and
+rejects live startup before opening devices. Before using it, fill in the actual
+TCP offset, payload and center of mass, initial joints, speed/acceleration limits,
+and workspace bounds (unless explicitly disabled). Confirm gripper model,
+baudrate, speed and endpoints too. Read-only diagnosis and dry-run work with
+unconfigured site fields. Matching controller readback does not calibrate a tool.
+
+### Environment, diagnosis and dry-run
+
+This machine uses Ubuntu 20.04.6 and project Python 3.12.14, with independent
+hardware/SDK and simulation environments. Install the real stack with:
+
+```bash
+sudo apt-get install libhidapi-hidraw0 libhidapi-libusb0
+uv venv --python 3.12  # only when .venv does not exist
+uv pip install --python .venv/bin/python -e '.[hardware,xarm]' -c requirements/xarm-validated.txt
+```
+
+The validated combination includes PySpaceMouse 2.1.0 and xArm SDK 1.18.4. Existing
+udev rules on this machine have been verified after replug; do not run teleop
+with sudo. A new machine needs its own matching HID access rule. The real route
+uses HID and Ethernet; ROS2, spacenavd, 3Dconnexion software and CUDA are not
+prerequisites. Real installation does not require MuJoCo; simulation does not
+require the SDK/HID extras.
+
+```bash
+.venv/bin/python scripts/spacemouse_diagnose.py --max-index 1
+.venv/bin/spacemouse-xarm-diagnose --config configs/spacemouse_xarm6_demo.json --gripper
+.venv/bin/spacemouse-xarm-teleop --config configs/spacemouse_xarm6_demo.json --dry-run --backend mock --duration 3 --log logs/xarm_preview.jsonl
+```
+
+Diagnosis uses audited read-only queries without automatic baud changes, warning
+clearing or enabling. Dry-run does not connect to the robot and skips automatic
+opening and joint reset. Mock input is restricted to dry-run. After formal site
+commissioning, the direct live entry is:
+
+```bash
+.venv/bin/spacemouse-xarm-teleop --config configs/spacemouse_xarm6_real.json
+```
+
+### Execution, logging and remaining limits
+
+`TeleopCommand` remains in m/s and rad/s. The SDK converts linear velocity to
+mm/s and uses base-frame Cartesian velocity in Mode 5; joint reset uses Mode 4.
+MuJoCo continues to consume command increments. Mode-changed state 5 is accepted
+at startup when otherwise healthy, and remains a fault during active control.
+Faults stop and exit; the application does not clear errors, reconnect, or resume
+automatically. Arm velocity commands expire on the controller if not refreshed.
+Near a feedback deadline, reset briefly waits for a newer report, logging
+`homing_waiting_feedback`; the 0.25 s feedback timeout remains in effect.
+
+The gripper uses a separate socket and worker. Its position target has no
+controller-side expiry: if the process or connection fails before a hold is
+accepted, the endpoint can still complete. Gripper/arm simultaneous physical
+motion and full fault-stop timing have not yet been accepted. The latest run
+verified their sequential operation and the startup sequence.
+
+Asynchronous JSONL logs contain config snapshots, raw input, common commands,
+actual send/acknowledgement times, robot and gripper feedback, startup stages and
+exit reasons. Console `goal_seq` counts acknowledged gripper target writes;
+`device_target` reads the device's target register. In the verified runs, open
+850 read back as 840, while close 230 read back as 230. New writes appear in the
+next feedback poll. Current logging does not provide camera/tactile streams,
+trajectory segmentation, success labels or an offline replay workflow.
+
+### Regression environments and next work
+
+The last real-backend/input run passed 93 tests, including startup order, gripper
+faults, input freshness, configuration isolation, reset beyond 30 s with slow
+reports, and true feedback timeout handling. Reproduce those checks with:
+
+```bash
+.venv/bin/python -m unittest discover -s tests -p 'test_xarm*.py' -v
+.venv/bin/python -m unittest discover -s tests -p 'test_input_safety.py' -v
+```
+
+Earlier simulation baseline/regression and headless smoke checks passed, but the
+latest implementation has not been rerun through the full simulator suite since
+the user paused simulation work. The existing workflow remains:
+
+```bash
+uv venv .venv-sim --python .venv/bin/python  # only when absent
+uv pip install --python .venv-sim/bin/python -e '.[sim]' -c requirements/sim-validated.txt
+.venv-sim/bin/python -m unittest discover -s tests -v
+SPACEMOUSE_TELEOP_BACKEND=mock SPACEMOUSE_TELEOP_VIEWER=0 PYTHON_BIN=.venv-sim/bin/python ./scripts/run_mujoco_spacemouse.sh --duration 5
+```
+
+SDK codec checks skip in the sim-only environment. Tests do not connect to a
+physical robot. See [PROGRESS_PLAN.md](PROGRESS_PLAN.md) for remaining demo
+acceptance checks and the proposed next-stage discussion: tool calibration,
+combined arm/gripper operation, then deciding whether to build trajectory and
+sensor data collection. That next development scope has not yet been selected.
 
 ## SpaceMouse Layer
 
@@ -74,7 +265,8 @@ target or velocity ramp. Each backend/controller decides what target the intent
 means for its hardware or simulator. The MuJoCo backend maps `open` and `close`
 to immediate endpoint targets and leaves `hold` at the current controller target.
 
-Defaults in `configs/spacemouse_xarm6.json`:
+The SDK real-robot entry point loads its own complete config described above.
+The following are generic debug defaults in `configs/spacemouse_xarm6.json`:
 
 ```text
 deadzone: 0.08

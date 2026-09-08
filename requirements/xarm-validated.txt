@@ -1,0 +1,8 @@
+# Ubuntu 20.04 x86_64 / Python 3.12.14, verified 2026-09-08.
+# Constraints for reproducing this machine; install the project separately.
+cffi==2.1.1
+easyhid==0.0.10
+hidapi==0.15.0
+pycparser==3.0
+pyspacemouse==2.1.0
+xarm-python-sdk==1.18.4

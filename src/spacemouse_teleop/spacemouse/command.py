@@ -25,6 +25,11 @@ class RawSpaceMouseState:
     yaw: float
     buttons: Tuple[int, ...] = field(default_factory=tuple)
     timestamp: float = 0.0
+    # Optional transport metadata; timestamp remains the control sample time.
+    report_timestamp: Optional[float] = None
+    report_sequence: Optional[int] = None
+    connected: bool = True
+    axis_report_timestamps: Optional[Tuple[Optional[float], ...]] = None
 
     def axis(self, name: str) -> float:
         try:

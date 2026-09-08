@@ -81,6 +81,8 @@ def load_config(path: Optional[str]) -> TeleopConfig:
         return TeleopConfig()
     with Path(path).open("r", encoding="utf-8") as config_file:
         data = json.load(config_file)
+    if "teleop" in data and "robot" in data:
+        raise ValueError("This is a real xArm config; use spacemouse-xarm-teleop")
     return TeleopConfig.from_mapping(data)
 
 

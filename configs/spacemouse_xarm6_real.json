@@ -1,0 +1,101 @@
+{
+  "teleop": {
+    "frame": "link_base",
+    "require_deadman": false,
+    "deadman_button": 0,
+    "translation_only_button": null,
+    "rotation_only_button": null,
+    "gripper": {
+      "open_button": 0,
+      "close_button": 1
+    },
+    "deadzone": 0.08,
+    "filter_alpha": 0.35,
+    "linear_scale_mps": 0.02,
+    "angular_scale_radps": 0.1,
+    "max_linear_speed_mps": 0.03,
+    "max_angular_speed_radps": 0.15,
+    "timeout_s": 0.25,
+    "mapping": {
+      "linear": {
+        "x": {
+          "source": "x",
+          "sign": 1
+        },
+        "y": {
+          "source": "y",
+          "sign": 1
+        },
+        "z": {
+          "source": "z",
+          "sign": 1
+        }
+      },
+      "angular": {
+        "x": {
+          "source": "roll",
+          "sign": 1
+        },
+        "y": {
+          "source": "pitch",
+          "sign": 1
+        },
+        "z": {
+          "source": "yaw",
+          "sign": 1
+        }
+      }
+    }
+  },
+  "reader": {
+    "backend": "pyspacemouse",
+    "device": "SpaceMouseCompact",
+    "device_index": 0,
+    "axis_convention": "ros",
+    "poll_hz": 250
+  },
+  "robot": {
+    "ip": "192.168.1.209",
+    "control_hz": 60,
+    "command_duration_s": 0.2,
+    "input_timeout_s": 0.25,
+    "feedback_timeout_s": 0.25,
+    "socket_timeout_s": 0.05,
+    "startup_timeout_s": 30,
+    "homing": {
+      "enabled": true,
+      "speed_radps": 0.1,
+      "accel_radps2": 0.2,
+      "tolerance_rad": 0.005,
+      "settle_s": 0.3,
+      "timeout_s": 120.0
+    }
+  },
+  "gripper": {
+    "enabled": true,
+    "model": null,
+    "baudrate": null,
+    "speed_pulse_s": null,
+    "open_pulse": 850,
+    "close_pulse": 0,
+    "poll_hz": 20,
+    "socket_timeout_s": 0.1,
+    "startup_open": {
+      "timeout_s": 10.0,
+      "tolerance_pulse": 15,
+      "settle_s": 0.2
+    }
+  },
+  "site": {
+    "expected_tcp_offset_mm_rad": null,
+    "expected_payload_kg_com_mm": null,
+    "initial_joints_rad": null,
+    "workspace_min_m": null,
+    "workspace_max_m": null,
+    "max_linear_speed_mps": null,
+    "max_angular_speed_radps": null,
+    "max_linear_accel_mps2": null,
+    "max_angular_accel_radps2": null,
+    "workspace_limits_enabled": true
+  }
+}

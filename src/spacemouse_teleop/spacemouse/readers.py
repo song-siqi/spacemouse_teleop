@@ -32,6 +32,24 @@ class SpaceMouseReader(ABC):
         self.close()
 
 
+class _HIDReportMonitor:
+    """Track each axis report channel without changing PySpaceMouse parsing."""
+    def __init__(self, device, mappings, timestamps):
+        self.device, self.mappings, self.timestamps = device, mappings, timestamps
+
+    def __getattr__(self, name):
+        return getattr(self.device, name)
+
+    def read(self, *args, **kwargs):
+        report = self.device.read(*args, **kwargs)
+        if report:
+            now = time.monotonic()
+            for index, name in enumerate(("x", "y", "z", "roll", "pitch", "yaw")):
+                if self.mappings[name].channel == report[0]:
+                    self.timestamps[index] = now
+        return report
+
+
 class PySpaceMouseReader(SpaceMouseReader):
     """Reader backed by the optional pyspacemouse package."""
 
@@ -46,6 +64,9 @@ class PySpaceMouseReader(SpaceMouseReader):
         self.axis_convention = axis_convention
         self._pyspacemouse = None
         self._device = None
+        self._report_sequence = 0
+        self._last_report_timestamp = None
+        self._axis_report_timestamps = None
 
     def open(self) -> None:
         _preload_hidapi_on_macos()
@@ -81,16 +102,41 @@ class PySpaceMouseReader(SpaceMouseReader):
             raise RuntimeError("pyspacemouse.open() failed; check SpaceMouse connection.")
         if hasattr(opened, "read"):
             self._device = opened
+            # Version-pinned 2.1 API: separate translation/rotation/button reports.
+            # A button packet must not renew a cached nonzero translation.
+            hid_device = getattr(opened, "_device", None)
+            info = getattr(opened, "_info", None)
+            if hid_device is not None and info is not None:
+                self._axis_report_timestamps = [None] * 6
+                opened._device = _HIDReportMonitor(hid_device, info.mappings, self._axis_report_timestamps)
 
     def read(self) -> Optional[RawSpaceMouseState]:
         if self._pyspacemouse is None:
             raise RuntimeError("reader is not open")
         read_source = self._device if self._device is not None else self._pyspacemouse
-        state = read_source.read()
+        if getattr(read_source, "connected", True) is False:
+            raise RuntimeError("SpaceMouse disconnected")
+        try:
+            state = read_source.read()
+        except Exception as exc:
+            raise RuntimeError(f"SpaceMouse read failed: {exc}") from exc
         if state is None:
             return None
 
+        # PySpaceMouse 2.1 updates t only when a real HID report is processed.
+        # It uses timeit.default_timer, the same monotonic clock as Python here.
+        report_timestamp = getattr(state, "t", None)
+        if report_timestamp is not None:
+            report_timestamp = float(report_timestamp)
+            if report_timestamp <= 0:
+                report_timestamp = None
+            elif report_timestamp != self._last_report_timestamp:
+                self._report_sequence += 1
+                self._last_report_timestamp = report_timestamp
         return RawSpaceMouseState(
+            report_timestamp=report_timestamp,
+            axis_report_timestamps=None if self._axis_report_timestamps is None else tuple(self._axis_report_timestamps),
+            report_sequence=self._report_sequence if report_timestamp is not None else None,
             x=float(getattr(state, "x", 0.0)),
             y=float(getattr(state, "y", 0.0)),
             z=float(getattr(state, "z", 0.0)),
@@ -142,6 +188,9 @@ class MockSpaceMouseReader(SpaceMouseReader):
             yaw=0.4 * math.sin(phase * 0.5 + math.pi / 5.0),
             buttons=(0, 0),
             timestamp=now,
+            report_timestamp=now,
+            axis_report_timestamps=(now,) * 6,
+            report_sequence=round(t * self.hz),
         )
 
 
@@ -185,6 +234,10 @@ def _candidate_hidapi_paths():
 
 
 def _hidapi_install_hint(original_message: str) -> str:
+    if platform.system() == "Linux":
+        return (f"{original_message}\nInstall the native HIDAPI runtime:\n"
+                "  sudo apt-get install libhidapi-hidraw0 libhidapi-libusb0\n"
+                "Then install this project's hardware extra in the venv.")
     return (
         f"{original_message}\n\n"
         "On macOS, pyspacemouse/easyhid also needs the native hidapi library.\n"

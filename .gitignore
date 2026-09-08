@@ -1,4 +1,5 @@
 .venv/
+.venv-sim/
 .uv-cache/
 .python-cache/
 .generated/

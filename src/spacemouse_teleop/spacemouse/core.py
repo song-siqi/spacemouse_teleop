@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Dict, Mapping, Optional, Tuple
 
@@ -147,9 +148,31 @@ class TeleopCore:
 
     def process(self, state: RawSpaceMouseState) -> TeleopCommand:
         now = float(state.timestamp)
+        axes = (state.x, state.y, state.z, state.roll, state.pitch, state.yaw)
+        if not math.isfinite(now):
+            return self.zero_command(self._last_timestamp or 0.0)
+        gap = None if self._last_timestamp is None else now - self._last_timestamp
+        if (not state.connected or not all(math.isfinite(v) for v in axes)
+                or (gap is not None and (gap <= 0 or gap > self.config.timeout_s))):
+            return self.zero_command(now)
+        # Idle HID devices need not emit reports; stale nonzero input is invalid.
+        if state.report_timestamp is not None:
+            age = now - state.report_timestamp
+            active = any(abs(v) >= self.config.deadzone and v != 0 for v in axes) or any(state.buttons)
+            if not math.isfinite(age) or age < 0 or (active and age > self.config.timeout_s):
+                return self.zero_command(now)
+        if state.axis_report_timestamps is not None:
+            if len(state.axis_report_timestamps) != 6:
+                return self.zero_command(now)
+            for value, reported in zip(axes, state.axis_report_timestamps):
+                if abs(value) >= self.config.deadzone and value != 0:
+                    if reported is None or not math.isfinite(reported) or not 0 <= now - reported <= self.config.timeout_s:
+                        return self.zero_command(now)
         dt = self._compute_dt(now)
 
         enabled = self._is_enabled(state)
+        if not enabled:
+            return self.zero_command(now)
         linear_raw = self._mapped_vector(state, self.config.linear_mapping)
         angular_raw = self._mapped_vector(state, self.config.angular_mapping)
 
