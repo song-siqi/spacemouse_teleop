@@ -1,0 +1,5 @@
+# Ubuntu 20.04 x86_64 / Python 3.12.14; C0/C1 verified 2026-09-09.
+-r xarm-validated.txt
+numpy==2.5.3
+opencv-python==5.0.0.93
+pyrealsense2==2.58.4.10922

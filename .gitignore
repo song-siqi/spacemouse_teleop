@@ -1,5 +1,5 @@
-.venv/
-.venv-sim/
+# Local Python environments and caches
+.venv*/
 .uv-cache/
 .python-cache/
 .generated/
@@ -8,7 +8,18 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
-logs/*.jsonl
-logs/*.json
-third_party/xarm_ros2/
-!.gitkeep
+
+# Runtime logs, experiments, recordings and exported datasets (not backups)
+/logs/*
+/data/
+
+# Optional complete machine-local configs; select explicitly with --config
+/configs/*.local.json
+
+# Generated packaging output
+/build/
+/dist/
+*.egg-info/
+
+# Downloaded upstream checkout; vendored simulation assets remain versioned
+/third_party/xarm_ros2/

@@ -37,7 +37,7 @@ def process_input(core, raw, intent, config):
     return replace(command, gripper_intent=intent if command.enabled else "hold")
 
 
-def run_loop(config, source, backend, recorder, duration=0., dry_run=False):
+def run_loop(config, source, backend, recorder, duration=0., dry_run=False, coordinator=None):
     core, limiter = TeleopCore(config.teleop), VelocityLimiter(config)
     started = time.monotonic()
     period = 1 / config.robot["control_hz"]
@@ -46,6 +46,8 @@ def run_loop(config, source, backend, recorder, duration=0., dry_run=False):
     last_print_intent = "hold"
     recorder.write({"event": "session_start", "timestamp": started, "dry_run": dry_run,
                     "wall_time_utc": datetime.now(timezone.utc).isoformat(), "config": asdict(config), "unverified_site_settings": config.missing_site_settings()})
+    if coordinator is not None:
+        coordinator.set_phase("preparing")
     if config.robot.get("homing", {}).get("enabled", False):
         if dry_run:
             print("Dry-run: startup gripper opening and homing skipped; no robot connection.")
@@ -54,12 +56,20 @@ def run_loop(config, source, backend, recorder, duration=0., dry_run=False):
                 print(f"Opening gripper first (timeout {config.gripper['startup_open']['timeout_s']:g} s); joint homing waits for confirmed opening.")
             target_deg = tuple(round(math.degrees(v), 2) for v in config.site["initial_joints_rad"])
             print(f"Homing to initial joints {target_deg} deg; timeout {config.robot['homing']['timeout_s']:g} s; SpaceMouse control starts after reset.")
-            backend.home(recorder, lambda: source.snapshot(time.monotonic()))
+            def startup_guard():
+                if coordinator is not None:
+                    coordinator.check_exit()
+                return source.snapshot(time.monotonic())
+            backend.home(recorder, startup_guard)
             print("Homing complete. Center the SpaceMouse and release both buttons.")
         started = time.monotonic()  # The demo duration starts after homing.
         next_tick, previous_tick, next_print = started, None, started
     print("Waiting for a SpaceMouse report with all axes centered and both buttons released.")
+    if coordinator is not None:
+        print("Collection: gently move then release the SpaceMouse and BOTH buttons. Wait for TELEOP ACTIVE before pressing Space in the preview.")
     while True:
+        if coordinator is not None and coordinator.poll(running) == "prepare_next":
+            return "prepare_next"
         now = time.monotonic()
         if duration and now - started >= duration:
             if not running:

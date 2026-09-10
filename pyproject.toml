@@ -12,6 +12,11 @@ hardware = [
     "pyspacemouse==2.1.0",
 ]
 xarm = ["xarm-python-sdk==1.18.4"]
+collection = [
+    "pyrealsense2==2.58.4.10922",
+    "numpy==2.5.3",
+    "opencv-python==5.0.0.93",
+]
 sim = [
     "mujoco>=3.2.0",
     "numpy>=1.24.0",
@@ -20,6 +25,12 @@ sim = [
 ]
 
 [project.scripts]
+spacemouse-collection-finalize = "spacemouse_teleop.cli.collection_finalize:main"
+spacemouse-xarm-frequency = "spacemouse_teleop.cli.xarm_frequency:main"
+spacemouse-realsense-diagnose = "spacemouse_teleop.cli.realsense_diagnose:main"
+spacemouse-xarm-collect = "spacemouse_teleop.cli.xarm_collect:main"
+spacemouse-collection-check = "spacemouse_teleop.cli.collection_check:main"
+spacemouse-collection-export = "spacemouse_teleop.cli.collection_export:main"
 spacemouse-xarm-diagnose = "spacemouse_teleop.cli.xarm_diagnose:main"
 spacemouse-xarm-teleop = "spacemouse_teleop.cli.xarm_teleop:main"
 spacemouse-diagnose = "spacemouse_teleop.cli.diagnose:main"

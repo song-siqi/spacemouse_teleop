@@ -7,6 +7,18 @@ Full tool commissioning and fault-stop validation remain open. See
 next-stage discussion. The existing MuJoCo pipeline remains separate; additional
 simulation checks are paused at the user's request.
 
+The three-camera 20 Hz collection route now saves native raw v2 data with
+three compressed videos. The first live video episode passed full validation:
+**1258 observations / 3774 image frames**, complete and kept, with temporary PNGs
+cleaned after archival. A second reset returned to teleop; only one episode was
+recorded. Commands remained about 60 Hz in the measured capture and approximate
+archive windows. **215 relevant tests passed**; legacy PNG and offline 20/10 Hz
+exports remain supported. Continuous multi-episode recording, simultaneous
+arm/gripper movement and broader fault checks remain open.
+See [the collection guide](docs/xarm_collection_setup.md),
+[latest field evidence](docs/collection_video_field_validation.md), and
+[repository/data boundaries](docs/repository_maintenance.md).
+
 This repo is organized around one reusable SpaceMouse command layer and separate execution backends for the real xArm6 stack and MuJoCo.
 
 ```text
@@ -14,6 +26,7 @@ SpaceMouse device
   -> src/spacemouse_teleop/spacemouse
   -> TeleopCommand
   -> backends/xarm_sdk     real xArm6 (basic hardware demo verified)
+  -> backends/xarm6_camera composition: existing SDK + three RGB views + raw episodes
   -> backends/mujoco       existing simulator
   -> backends/xarm_ros2    future ROS2 adapter/reference
 ```
@@ -27,7 +40,8 @@ src/spacemouse_teleop/spacemouse SpaceMouse reader, mapping, filters, command co
 src/spacemouse_teleop/backends   execution adapters, one subdirectory per backend
 src/spacemouse_teleop/backends/mujoco/assets/xarm_ros2
                                  repo-local xArm6/gripper simulation asset subset
-src/spacemouse_teleop/recording  lightweight debug/data logging helpers
+src/spacemouse_teleop/sensors    independent RealSense RGB acquisition
+src/spacemouse_teleop/recording  control logs, raw episodes, integrity checks and offline export
 third_party/xarm_ros2/           read-only upstream reference clone
 ```
 
@@ -52,8 +66,8 @@ For the ROS2 reference path, the xArm ROS2 controller updates at `150 Hz` and th
 The basic real-robot demo is working. On 2026-09-08 the user verified the full
 sequence: automatic gripper opening, joint reset, SpaceMouse teleop, gripper
 control, and normal exit. The latest run recorded 3405 arm commands over 56.73 s
-at approximately 60 Hz, with no reported arm/gripper errors. The last automated
-run passed 93 real-backend/input tests. Tool calibration, simultaneous arm/gripper
+at approximately 60 Hz, with no reported arm/gripper errors. The dated 2026-09-08
+review passed 97 relevant offline tests. Tool calibration, simultaneous arm/gripper
 motion, and physical fault-stop measurements remain open. See
 [the progress plan](PROGRESS_PLAN.md) for the next discussion and
 [the validation record](docs/xarm_sdk_validation.md) for dated evidence.
@@ -127,6 +141,7 @@ still apply. The reset does not perform scene collision-path planning.
 | --- | --- |
 | `scripts/run_xarm_demo.sh` | `configs/spacemouse_xarm6_demo.json` |
 | SDK teleop / diagnosis default | `configs/spacemouse_xarm6_real.json` |
+| `scripts/run_xarm_collection.sh` | `configs/spacemouse_xarm6_collection.json`, referencing the complete demo robot config |
 | MuJoCo shell launcher | `configs/spacemouse_xarm6_mujoco.json` |
 | Direct MuJoCo CLI / generic debug default | `configs/spacemouse_xarm6.json` |
 
@@ -199,14 +214,19 @@ actual send/acknowledgement times, robot and gripper feedback, startup stages an
 exit reasons. Console `goal_seq` counts acknowledged gripper target writes;
 `device_target` reads the device's target register. In the verified runs, open
 850 read back as 840, while close 230 read back as 230. New writes appear in the
-next feedback poll. Current logging does not provide camera/tactile streams,
-trajectory segmentation, success labels or an offline replay workflow.
+next feedback poll. This demo log remains a control/debug log. The independent
+collection entry below adds RGB and episode recording; no tactile capture or
+success/failure labels are inferred from its keep/discard controls.
 
 ### Regression environments and next work
 
-The last real-backend/input run passed 93 tests, including startup order, gripper
-faults, input freshness, configuration isolation, reset beyond 30 s with slow
-reports, and true feedback timeout handling. Reproduce those checks with:
+The historical 97-test review covers startup order, gripper faults, input
+freshness, configuration isolation, reset beyond 30 s with slow reports, and true
+feedback timeouts. The collection route adds independent alignment, storage,
+coordinator, camera and export tests; the 2026-09-09 combined run passed **190**
+relevant tests; the 2026-09-10 video implementation increased this to **215**.
+See the progress document for the breakdown and evidence.
+Reproduce the real-backend/input checks with:
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -p 'test_xarm*.py' -v
@@ -226,9 +246,85 @@ SPACEMOUSE_TELEOP_BACKEND=mock SPACEMOUSE_TELEOP_VIEWER=0 PYTHON_BIN=.venv-sim/b
 
 SDK codec checks skip in the sim-only environment. Tests do not connect to a
 physical robot. See [PROGRESS_PLAN.md](PROGRESS_PLAN.md) for remaining demo
-acceptance checks and the proposed next-stage discussion: tool calibration,
-combined arm/gripper operation, then deciding whether to build trajectory and
-sensor data collection. That next development scope has not yet been selected.
+acceptance checks. The selected next stage is three-camera 20 Hz collection;
+its software, stationary acquisition, and first motion episode have been
+validated. Continuous multi-episode recording and simultaneous arm/gripper motion are the
+next hardware checks; one second reset has now returned to teleop; internal device sample clocks remain unavailable.
+The existing R1/R2 review items and formal tool commissioning remain open.
+
+## Three-camera 20 Hz collection
+
+Install the independent collection dependencies into the existing project environment:
+
+```bash
+uv pip install --python .venv/bin/python -e '.[hardware,xarm,collection]' -c requirements/collection-validated.txt
+```
+
+The default collection config binds all three required views by serial:
+`wrist`, `fixed_1`, and `fixed_2`. It uses 640×480 RGB at 30 fps per camera,
+30 Hz independent joint/TCP queries, existing gripper feedback, and a 20 Hz saved
+grid. The SDK backend source is unchanged; existing demo/simulation entrypoints retain
+their defaults when no collection coordinator is supplied.
+
+```bash
+# Live GUI: opens the gripper and resets the arm before teleop; no session time limit.
+./scripts/run_xarm_collection.sh --task pick_place
+
+# Real cameras + robot read-only queries; does not enable, reset, or move the robot.
+./scripts/run_xarm_collection.sh --task readonly_check --observe-only --headless --auto-record --duration 60 --output logs/collection_checks
+
+# Synthetic input, cameras and robot states; no hardware connections.
+./scripts/run_xarm_collection.sh --task mock_check --dry-run --headless --auto-record --duration 3 --output logs/collection_mock
+```
+
+After reset, the preview shows **WAITING FOR SPACEMOUSE** until a centered input
+report arrives. Briefly push and release the knob, release both buttons, and wait
+for **TELEOP ACTIVE**. With the preview focused, **Space** starts/ends recording,
+**K** keeps, **X** marks discarded, **N** prepares the next episode by opening and
+resetting again, and **Q** exits. SpaceMouse buttons still operate the gripper.
+After Space ends recording, wait for background video compression and validation
+before K/X or N. Teleop remains available during this phase.
+
+The default config saves **raw format v2: three compressed MP4 videos**, native
+state JSONL, all 20 Hz observations, provenance and session control logs. It does
+not produce training actions or a LeRobot dataset. During recording, selected
+frames are written as episode-local temporary PNGs. After a normal stop, separate
+FFmpeg workers encode and fully validate the videos before committing `complete`
+and removing staging PNGs. Failures retain staging and do not interrupt teleop;
+robot/input faults retain the existing stop/exit behavior.
+
+Video mode requires system **FFmpeg/ffprobe with libx264**; availability is checked
+before robot connection or reset. The encoder uses CRF 18, medium, yuv420p, GOP 40,
+two threads per camera and the episode save rate (normally 20 fps). No training
+dependencies are added. Old configs without `visual_storage` keep PNG mode and old
+PNG datasets remain readable. The default config explicitly selects
+`"visual_storage": {"mode": "video_after_episode"}`.
+
+The prior motion recording required about **1.4 GB/minute in PNGs**. That temporary
+capacity is still needed until compression finishes, in addition to the 10 GiB
+free-space reserve. Final video capacity, archival duration and offline acceptance
+are recorded in [video integration validation](docs/collection_video_validation.md).
+An interrupted archive with a verified normal-capture marker can be retried offline:
+
+```bash
+.venv/bin/spacemouse-collection-finalize /absolute/path/to/episodes/episode_000001
+```
+
+This command cannot repair recording gaps or convert existing v1 PNG datasets.
+Q stops the robot first; normally ended archives may finish within their remaining
+`max(120 s, 2 × capture duration)` deadline. Quitting an active recording leaves it
+incomplete. K/X remains independent of integrity; X does not delete data.
+
+See [setup and controls](docs/xarm_collection_setup.md),
+[raw format](docs/collection_format.md), [frequency evidence](docs/collection_frequency_validation.md),
+[first motion validation](docs/collection_motion_validation.md), and
+[storage comparison](docs/collection_storage_validation.md).
+Independent offline experiments already loaded these H.264 videos with native
+LeRobot v2.1/v3.0 datasets; see [compatibility evidence](docs/lerobot_video_compatibility.md).
+This change preserves the legacy/light/derived bridge and does not introduce a
+formal LeRobot exporter or run training. The first live video archive and one second reset now have
+[field evidence](docs/collection_video_field_validation.md); continuous multiple
+recordings and broader operating conditions remain to be accepted.
 
 ## SpaceMouse Layer
 
