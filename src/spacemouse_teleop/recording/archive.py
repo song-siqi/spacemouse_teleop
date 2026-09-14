@@ -96,7 +96,7 @@ def _eligible(meta, capture_ready=False):
 
 def finalize_episode(path, *, progress=None, runner=None, tools=None, _capture_ready=False):
     """Archive v2 or retry an intact, normally ended v2 capture; never repair capture gaps."""
-    from .export import _load_episode, _read_json
+    from .raw import _load_episode, _read_json
     original = Path(path).absolute()
     if original.is_symlink(): raise VideoError('Episode cannot be a symlink')
     root = original.resolve()

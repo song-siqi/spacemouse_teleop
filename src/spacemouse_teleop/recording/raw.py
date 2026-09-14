@@ -1,22 +1,16 @@
-"""Offline validation and versioned exports of native collection episodes.
+"""Read-only validation of native collection episodes (v1/v2/v3).
 
 No camera, robot, training framework, or array library is imported here.
 """
 from __future__ import annotations
 
-import csv
 import json
 import math
-import shutil
-import tempfile
 from pathlib import Path
 
 from .visual import (safe_file as _file, png_size as _png_size, video_reference,
-                     validate_video, VisualReader, file_sha256)
+                     validate_video, file_sha256)
 
-FORMAT_VERSION = 1
-JOINT_COLUMNS = tuple(f"j{i}_rad" for i in range(1, 7))
-TCP_COLUMNS = ("tcp_x_m", "tcp_y_m", "tcp_z_m", "tcp_rx_rad", "tcp_ry_rad", "tcp_rz_rad")
 ROLES = ("wrist", "fixed_1", "fixed_2")
 
 
@@ -67,8 +61,8 @@ def _load_episode(path, *, require_kept=False, _archive=False, _staged=False, _r
         raise ValueError("Unsupported native episode format_version")
     if not _archive and meta.get("status") != "complete":
         raise ValueError("Episode is not complete")
-    if not _archive and (meta.get("disposition") == "discarded" or require_kept and meta.get("disposition") != "kept"):
-        raise ValueError("Only kept episodes can be exported; discarded episodes are invalid")
+    if require_kept and meta.get("disposition") != "kept":
+        raise ValueError("Operator has not kept this episode")
     fps = _finite(meta.get("sample_hz"), "sample_hz")
     if fps <= 0:
         raise ValueError("sample_hz must be positive")
@@ -199,176 +193,178 @@ def _load_episode(path, *, require_kept=False, _archive=False, _staged=False, _r
                "source_repeat_counts": source_repeats, "max_source_age_s": max_age,
                "status": meta["status"], "disposition": meta.get("disposition")}
     if any(source_repeats.values()):
-        summary["warnings"].append("Repeated source samples exist; inspect counts and age limits before training")
+        summary["warnings"].append("Repeated source samples exist; inspect counts and age limits without changing raw records")
     return root, meta, observations, summary
 
 
 def check_episode(path, *, require_kept=False):
     """Return a machine-readable report. This function never changes an episode."""
     try:
+        meta = _read_json(Path(path) / "meta.json")
+        if meta.get("format_version") == 3:
+            if require_kept and meta.get("disposition") != "kept":
+                raise ValueError("Operator has not kept this episode")
+            return validate_native_episode(path, meta=meta)
         return _load_episode(path, require_kept=require_kept)[3]
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
         return {"valid": False, "errors": [str(exc)], "warnings": []}
 
 
-def _multiply(a, b):
-    w, x, y, z = a
-    v, i, j, k = b
-    return (w*v-x*i-y*j-z*k, w*i+x*v+y*k-z*j, w*j-x*k+y*v+z*i, w*k+x*j-y*i+z*v)
+def iter_source(path, filename):
+    """Read raw rows in stored order. Never select, interpolate or derive actions."""
+    root = Path(path).resolve()
+    source = _file(root, filename)
+    with source.open(encoding="utf-8") as handle:
+        for number, line in enumerate(handle, 1):
+            if not line.strip(): continue
+            try:
+                row = json.loads(line, parse_constant=lambda v: (_ for _ in ()).throw(ValueError(v)))
+                if not isinstance(row, dict): raise ValueError("expected object")
+            except ValueError as exc:
+                raise ValueError(f"{filename}:{number}: invalid JSON: {exc}") from exc
+            yield row
 
+def _ordered(row, previous, source):
+    sequence = _integer(row.get("sequence"), f"{source} sequence")
+    received = _finite(row.get("received_at"), f"{source} received_at")
+    epoch = _integer(row.get("clock_epoch"), f"{source} clock_epoch")
+    if not isinstance(row.get("clock_id"), str) or not row["clock_id"]:
+        raise ValueError(f"{source} clock identity missing")
+    if previous is not None and (received < previous[1] or sequence <= previous[0]):
+        raise ValueError(f"{source} sequence/receive time is out of order")
+    return sequence, received
 
-def _rpy_quaternion(rpy):
-    roll, pitch, yaw = (v / 2 for v in rpy)
-    cr, sr, cp, sp, cy, sy = math.cos(roll), math.sin(roll), math.cos(pitch), math.sin(pitch), math.cos(yaw), math.sin(yaw)
-    return (cr*cp*cy+sr*sp*sy, sr*cp*cy-cr*sp*sy, cr*sp*cy+sr*cp*sy, cr*cp*sy-sr*sp*cy)
+def validate_native_episode(path, *, meta=None, check_hashes=True,
+                            allow_uncommitted=False, runner=None):
+    """Check storage integrity, not synchronization or training suitability."""
+    from spacemouse_teleop.backends.xarm6_camera.report import decode_report
+    root = Path(path).resolve()
+    meta = _read_json(root / "meta.json") if meta is None else meta
+    if meta.get("format_version") != 3:
+        raise ValueError("Expected raw format_version 3")
+    if not allow_uncommitted and meta.get("status") != "complete":
+        raise ValueError("Raw capture has no successful completion marker")
+    if (root / "observations.jsonl").exists():
+        raise ValueError("Raw v3 must not contain an observation grid")
+    start = _finite(meta.get("capture_requested_start_time"), "capture window start")
+    end = _finite(meta.get("capture_requested_end_time"), "capture window end")
+    if end < start: raise ValueError("Capture window is backwards")
+    def in_window(row):
+        if not start <= row["received_at"] <= end:
+            raise ValueError("Source lies outside recorded capture window")
+    cameras = meta.get("cameras", [])
+    if len(cameras) != 3 or {c.get("role") for c in cameras} != set(ROLES):
+        raise ValueError("Camera bindings missing")
+    expected_files = {"robot_states.jsonl", "robot_reports.bin", "gripper_states.jsonl",
+                      "auxiliary_states.jsonl"}
+    frames, video_checks = {}, {}
+    for spec in cameras:
+        role, fps = spec["role"], _finite(spec["fps"], "camera fps")
+        if fps <= 0: raise ValueError("Camera fps must be positive")
+        filename = f"frames/{role}.jsonl"
+        expected_files.update((filename, f"videos/{role}.mp4"))
+        count, previous = 0, None
+        for row in iter_source(root, filename):
+            previous = _ordered(row, previous, role)
+            in_window(row)
+            if row.get("role") != role or row.get("serial") != spec.get("serial"):
+                raise ValueError(f"{role} identity mismatch")
+            if (row.get("width"), row.get("height")) != (spec["width"], spec["height"]):
+                raise ValueError(f"{role} dimensions mismatch")
+            _integer(row.get("frame_id"), "device frame number")
+            _finite(row.get("device_timestamp_ms"), "SDK camera timestamp")
+            if not isinstance(row.get("timestamp_domain"), str):
+                raise ValueError("Camera timestamp domain missing")
+            video_reference(row, role, count, fps)
+            count += 1
+        if not count or meta.get("frame_counts", {}).get(role) != count:
+            raise ValueError(f"{role} frame index count mismatch/empty")
+        frames[role] = count
+        video_checks[role] = validate_video(_file(root, f"videos/{role}.mp4"), count, fps,
+                                            spec["width"], spec["height"], runner=runner)
+    counts = {"robot": 0, "gripper": 0, "auxiliary": 0}
+    invalid = dict.fromkeys(counts, 0)
+    offset, previous = 0, None
+    with _file(root, "robot_reports.bin").open("rb") as binary:
+        for row in iter_source(root, "robot_states.jsonl"):
+            previous = _ordered(row, previous, "robot")
+            in_window(row)
+            if row.get("kind") != "robot" or row.get("packet_file") != "robot_reports.bin":
+                raise ValueError("Robot source/packet reference missing")
+            if _integer(row.get("packet_offset"), "packet offset") != offset:
+                raise ValueError("Robot packet offset gap or overlap")
+            size = _integer(row.get("packet_bytes"), "packet bytes")
+            if size not in (784, 804): raise ValueError("Unsupported packet length")
+            packet = binary.read(size)
+            decoded = decode_report(packet)
+            if (row.get("values") != decoded["values"] or
+                    row.get("device_timestamp_raw") != decoded["device_timestamp_raw"] or
+                    row.get("device_timestamp_unit") != "us" or row.get("valid") != decoded["valid"]):
+                raise ValueError("Decoded robot record differs from original packet")
+            offset += size
+            counts["robot"] += 1
+            invalid["robot"] += int(not row["valid"])
+        if binary.read(1): raise ValueError("Unindexed trailing robot packet bytes")
+    for kind, filename in (("gripper", "gripper_states.jsonl"), ("auxiliary", "auxiliary_states.jsonl")):
+        previous_by_kind = {}
+        for row in iter_source(root, filename):
+            key = row.get("kind")
+            if key != ("gripper" if kind == "gripper" else "report"):
+                raise ValueError("Invalid state stream kind")
+            previous_by_kind[key] = _ordered(row, previous_by_kind.get(key), key)
+            in_window(row)
+            if "query_started_at" in row or "query_finished_at" in row:
+                if not (_finite(row.get("query_started_at"), "query start") <=
+                        _finite(row.get("query_finished_at"), "query finish") <= row["received_at"]):
+                    raise ValueError("Invalid query interval")
+            if kind == "gripper" and row.get("valid"):
+                _finite(row.get("values", {}).get("position_pulse"), "actual gripper position")
+            counts[kind] += 1
+            invalid[kind] += int(not row.get("valid"))
+    if not counts["robot"] or not counts["gripper"]:
+        raise ValueError("Required native robot/gripper streams are empty")
+    if meta.get("state_counts") != counts:
+        raise ValueError("State count mismatch")
+    session = root.parent.parent
+    for key, expected in (("session_metadata", "../../session.json"),
+                          ("session_log", "../../control.jsonl"),
+                          ("session_events", "../../events.jsonl"),
+                          ("clock_anchors", "../../clock_anchors.jsonl")):
+        if meta.get(key) != expected or not (root / expected).is_file():
+            raise ValueError(f"Missing session evidence: {key}")
+    anchor_count = 0
+    for row in iter_source(session, "clock_anchors.jsonl"):
+        before = _integer(row.get("monotonic_before_ns"), "clock bracket start")
+        after = _integer(row.get("monotonic_after_ns"), "clock bracket end")
+        _integer(row.get("realtime_ns"), "realtime")
+        if before > after or row.get("read_interval_ns") != after-before:
+            raise ValueError("Invalid host clock bracket")
+        anchor_count += 1
+    if not anchor_count: raise ValueError("Clock anchors missing")
+    if check_hashes:
+        session_meta = _read_json(session / "session.json")
+        if session_meta.get("format_version") != 3:
+            raise ValueError("Wrong session format version")
+        if session_meta.get("status") == "incomplete":
+            raise ValueError("Session evidence is incomplete")
+        if session_meta.get("status") == "closed":
+            shared = session_meta.get("files", {})
+            if set(shared) != {"control.jsonl", "events.jsonl", "clock_anchors.jsonl"}:
+                raise ValueError("Session file manifest incomplete")
+            for filename, info in shared.items():
+                file = _file(session, filename)
+                if file.stat().st_size != info.get("bytes") or file_sha256(file, runner) != info.get("sha256"):
+                    raise ValueError(f"Session checksum mismatch: {filename}")
+        files = meta.get("files", {})
+        if set(files) != expected_files: raise ValueError("Raw file manifest incomplete")
+        for filename in expected_files:
+            file = _file(root, filename)
+            if file.stat().st_size != files[filename].get("bytes") or file_sha256(file, runner) != files[filename].get("sha256"):
+                raise ValueError(f"Raw checksum mismatch: {filename}")
+    return {"valid": True, "errors": [], "format_version": 3,
+            "warnings": ["Cross-device clock mapping is not calibrated; integrity does not establish training quality"],
+            "frame_counts": frames, "image_count": sum(frames.values()), "video_file_count": 3,
+            "video_checks": video_checks, "state_counts": counts, "invalid_state_counts": invalid,
+            "clock_anchor_count": anchor_count, "continuity": meta.get("continuity", {}),
+            "status": meta["status"], "disposition": meta.get("disposition")}
 
-
-def rotation_delta_base(current_rpy, next_rpy):
-    """SO(3) log(R_next R_current^T), base-frame rotation vector in radians.
-
-    Input uses R = Rz(yaw) Ry(pitch) Rx(roll). The principal rotation is chosen;
-    half-turn axis sign is inherently ambiguous, and no winding is inferred.
-    """
-    before = _rpy_quaternion(current_rpy)
-    after = _rpy_quaternion(next_rpy)
-    q = _multiply(after, (before[0], -before[1], -before[2], -before[3]))
-    norm = math.sqrt(sum(v*v for v in q))
-    q = tuple(v / norm * (-1 if q[0] < 0 else 1) for v in q)
-    sine = math.sqrt(sum(v*v for v in q[1:]))
-    scale = 2. if sine < 1e-12 else 2 * math.atan2(sine, q[0]) / sine
-    return [scale * v for v in q[1:]]
-
-
-def _write_json(path, value):
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-
-
-def _write_rows(path, rows):
-    with path.open("w", encoding="utf-8") as stream:
-        for row in rows:
-            stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
-
-
-def _state(row):
-    return list(row["joints_rad"]) + [row["gripper"]["position_pulse"]]
-
-
-def export_episode(path, output, *, format="legacy", fps=20, fixed_view=None,
-                   gripper_open=None, gripper_close=None, binary_threshold=.5):
-    """Export one complete kept episode to a new directory, preserving native data.
-
-    Legacy layout is an episode directory; place it under TASK/EPISODE for the
-    external converter's ``raw_root/*/*/meta.json`` discovery convention.
-    Derived mappings require explicit raw gripper calibration endpoints.
-    """
-    root, meta, rows, validation = _load_episode(path, require_kept=True)
-    if format not in ("legacy", "light", "derived"):
-        raise ValueError("format must be legacy, light, or derived")
-    if fps not in (10, 20) or meta["sample_hz"] not in (10, 20) or fps > meta["sample_hz"]:
-        raise ValueError("Only native 20/10 Hz and explicit 20-to-10 Hz downsampling are supported")
-    if format in ("legacy", "light") and fixed_view not in ("fixed_1", "fixed_2"):
-        raise ValueError("Choose fixed_view=fixed_1 or fixed_2 for a two-view export")
-    stride = int(meta["sample_hz"] / fps)
-    selected = rows[::stride]
-    if len(selected) < 2:
-        raise ValueError("At least two selected samples are needed; no final action is fabricated")
-    mapping = None
-    if format == "derived":
-        opened, closed = _finite(gripper_open, "gripper_open"), _finite(gripper_close, "gripper_close")
-        threshold = _finite(binary_threshold, "binary_threshold")
-        if opened <= closed or not 0 <= threshold <= 1:
-            raise ValueError("Require gripper_open > gripper_close and binary_threshold in [0, 1]")
-        mapping = {"open_pulse": opened, "close_pulse": closed, "binary_open_threshold_normalized": threshold,
-                   "normalized": "clip((raw-close)/(open-close),0,1)", "binary": "1=open when normalized>=threshold; 0=closed"}
-    target = Path(output).absolute()
-    if target.is_symlink():
-        raise ValueError("Output cannot be a symlink")
-    resolved = target.resolve()
-    if resolved == root or resolved.is_relative_to(root) or root.is_relative_to(resolved):
-        raise ValueError("Export output must be separate from the native episode")
-    if target.exists() and (not target.is_dir() or any(target.iterdir())):
-        raise ValueError("Refusing to overwrite nonempty output")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    export_meta = {"format": f"spacemouse_{format}_v1", "format_version": 1, "task": meta["task"],
-                   "source_episode": str(root), "source_format_version": meta["format_version"],
-                   "source_sample_hz": meta["sample_hz"], "fps": fps, "sample_hz": fps, "save_hz": fps,
-                   "source_indices": [row["index"] for row in selected], "observation_count": len(selected),
-                   "training_pair_count": len(selected)-1, "status": "complete", "disposition": "kept",
-                   "time_alignment": "select original fixed-grid samples; no interpolation or gap compression",
-                   "state_columns": list(JOINT_COLUMNS) + ["gripper_mm"],
-                   "state_units": ["rad"] * 6 + ["raw pulse"], "gripper_mapping": mapping,
-                   "camera_mapping": {"realsense_0": fixed_view, "realsense_1": "wrist"} if fixed_view else None,
-                   "action_definition": "actions[t] = state[t+1] after downsampling; terminal observation has no action",
-                   "native_validation": validation, "source_metadata": meta}
-    if fixed_view:
-        export_meta["cameras"] = [
-            {"name": camera, "role": role, "kind": "realsense", **{
-                key: selected[0]["images"][role][key] for key in ("serial", "width", "height", "capture_fps")},
-             "saved_fps": fps}
-            for camera, role in (("realsense_0", fixed_view), ("realsense_1", "wrist"))]
-    if format == "legacy":
-        export_meta["legacy_unit_mapping"] = {"gripper_mm": "raw pulse, not geometric millimeters",
-                                               "tcp_x_m,tcp_y_m,tcp_z_m": "millimeters despite historical names",
-                                               "tcp_rx_rad,tcp_ry_rad,tcp_rz_rad": "radians; Rz(yaw) Ry(pitch) Rx(roll)"}
-        export_meta["external_converter"] = {"layout": "RAW_ROOT/TASK/EPISODE", "fps": fps,
-                                             "note": "Pass the matching fps explicitly to the external LeRobot converter"}
-    if format == "derived":
-        export_meta["action_definition"] = "measured state differences over dt_s, not commanded control intent"
-        export_meta["joint_delta_convention"] = "principal atan2(sin(q_next-q),cos(q_next-q)); assumes each joint moves less than pi per sample"
-        export_meta["tcp_rotation_convention"] = "base-frame SO(3) rotation vector log(R_next R_current^T); R=Rz(yaw)Ry(pitch)Rx(roll)"
-    with tempfile.TemporaryDirectory(prefix=f".{target.name}-", dir=target.parent) as temporary:
-        staging = Path(temporary) / "export"
-        staging.mkdir()
-        copied = []
-        if format in ("legacy", "light"):
-            with VisualReader(root) as reader:
-                for index, row in enumerate(selected):
-                    paths = {}
-                    for camera, role in (("realsense_0", fixed_view), ("realsense_1", "wrist")):
-                        relative = f"{camera}/{index:06d}.png"
-                        destination = staging / relative
-                        destination.parent.mkdir(exist_ok=True)
-                        reader.export_png(row["images"][role], destination)
-                        paths[camera] = relative
-                    copied.append(paths)
-        if format == "legacy":
-            columns = ("ts", *JOINT_COLUMNS, *TCP_COLUMNS, "gripper_mm", "realsense_0_file", "realsense_1_file")
-            with (staging / "robot_log.csv").open("w", encoding="utf-8", newline="") as stream:
-                writer = csv.DictWriter(stream, fieldnames=columns)
-                writer.writeheader()
-                for row, files in zip(selected, copied):
-                    item = dict(zip(JOINT_COLUMNS, row["joints_rad"]))
-                    item.update(zip(TCP_COLUMNS, row["tcp_mm_rad"]))
-                    item.update(ts=row["relative_time_s"], gripper_mm=row["gripper"]["position_pulse"],
-                                realsense_0_file=files["realsense_0"], realsense_1_file=files["realsense_1"])
-                    writer.writerow(item)
-        else:
-            converted = []
-            for index, (before, after) in enumerate(zip(selected, selected[1:])):
-                row = {"episode_index": 0, "frame_index": index, "timestamp": before["relative_time_s"],
-                       "source_index": before["index"], "next_source_index": after["index"],
-                       "dt_s": after["relative_time_s"]-before["relative_time_s"], "task": meta["task"]}
-                if format == "light":
-                    row.update(image=copied[index]["realsense_0"], wrist_image=copied[index]["realsense_1"],
-                               state=_state(before), actions=_state(after), prompt=meta["task"])
-                else:
-                    current, future = before["gripper"]["position_pulse"], after["gripper"]["position_pulse"]
-                    normalize = lambda value: max(0., min(1., (value-closed)/(opened-closed)))
-                    n0, n1 = normalize(current), normalize(future)
-                    row.update(joints_rad=before["joints_rad"], next_joints_rad=after["joints_rad"],
-                               delta_joint_pose=[math.atan2(math.sin(b-a), math.cos(b-a)) for a, b in zip(before["joints_rad"], after["joints_rad"])],
-                               tcp_mm_rad=before["tcp_mm_rad"], next_tcp_mm_rad=after["tcp_mm_rad"],
-                               delta_tcp_translation_base_m=[(b-a)/1000 for a,b in zip(before["tcp_mm_rad"][:3],after["tcp_mm_rad"][:3])],
-                               delta_tcp_rotation_base_rad=rotation_delta_base(before["tcp_mm_rad"][3:],after["tcp_mm_rad"][3:]),
-                               gripper={"absolute_raw": current, "next_absolute_raw": future, "delta_raw": future-current,
-                                        "normalized": n0, "next_normalized": n1,
-                                        "binary_open": int(n0>=threshold), "next_binary_open": int(n1>=threshold)})
-                converted.append(row)
-            _write_rows(staging / ("train.jsonl" if format == "light" else "derived.jsonl"), converted)
-        _write_json(staging / "meta.json", export_meta)
-        if target.exists():
-            if not target.is_dir() or any(target.iterdir()) or target.is_symlink():
-                raise ValueError("Output became nonempty while exporting; refusing overwrite")
-            target.rmdir()
-        staging.rename(target)
-    return export_meta

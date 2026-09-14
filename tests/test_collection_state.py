@@ -46,6 +46,19 @@ class CollectionStateTests(unittest.TestCase):
         observed = ObservedChannel(Channel(), fail, lambda: 1)
         self.assertEqual(observed.gripper_status()['position_pulse'], 300.)
 
+    def test_failed_gripper_query_keeps_interval_and_original_exception(self):
+        samples = []
+        failure = TimeoutError("gripper timeout")
+        class Bad(Channel):
+            def gripper_status(self): raise failure
+        observed = ObservedChannel(Bad(), samples.append, lambda: 1)
+        with self.assertRaises(TimeoutError) as caught:
+            observed.gripper_status()
+        self.assertIs(caught.exception, failure)
+        self.assertFalse(samples[0]["valid"])
+        self.assertLessEqual(samples[0]["query_started_at"], samples[0]["query_finished_at"])
+        self.assertEqual(samples[0]["query_finished_at"], samples[0]["received_at"])
+
     def test_equal_values_are_new_responses_but_not_motion_evidence(self):
         rows = [{'kind':'joints','sequence':i,'valid':True,'values':{'joints_rad':[0.]*6},
                  'received_at':i*.05, 'query_started_at':i*.05-.001,'query_finished_at':i*.05}

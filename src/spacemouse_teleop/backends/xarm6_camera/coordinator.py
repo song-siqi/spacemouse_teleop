@@ -16,6 +16,10 @@ class CollectionCoordinator:
         self._last_key = {}
 
     def set_phase(self, phase):
+        if phase == 'preparing' or self.phase == 'preparing' and phase != 'preparing':
+            boundary = getattr(self.recorder, 'mark_boundary', None)
+            if boundary:
+                boundary('preparation_start' if phase == 'preparing' else 'preparation_end')
         self.phase = phase
 
     def _drain(self):
@@ -39,7 +43,7 @@ class CollectionCoordinator:
             raise KeyboardInterrupt
 
     def poll(self, running):
-        self.phase = getattr(self, 'ready_phase', 'teleop') if running else 'waiting_neutral'
+        self.set_phase(getattr(self, 'ready_phase', 'teleop') if running else 'waiting_neutral')
         self.check_exit()
         if self.auto_record and running and not self.auto_started:
             result = self.recorder.start_episode()
@@ -63,7 +67,7 @@ class CollectionCoordinator:
                 self.recorder.disposition('kept' if event == 'keep' else 'discarded')
             elif event == 'prepare_next':
                 if running and status['state'] == 'idle':
-                    self.phase = 'preparing'
+                    self.set_phase('preparing')
                     self.auto_started = False
                     return 'prepare_next'
                 self.message = 'End the episode and choose K (keep) or X (discard) before N.'
@@ -78,10 +82,9 @@ class CollectionCoordinator:
         labels = {'preparing':'RESETTING','waiting_neutral':'WAITING FOR SPACEMOUSE',
                   'teleop':'TELEOP ACTIVE','read_only':'READ ONLY'}
         recording = self.recorder.status()
-        archive = recording.get('archive', {})
-        if recording['state'] == 'finalizing' and archive:
-            instructions[self.phase] = (f"Video {archive.get('phase')}: {archive.get('role') or 'all cameras'} "
-                f"{archive.get('frames',0)}/{archive.get('total_frames',recording.get('frame_count',0))}. "
-                'Teleop continues; wait before K/X and N.')
+        if recording['state'] == 'postroll':
+            instructions[self.phase] = 'Saving the end buffer; wait before K/X or N.'
+        elif recording['state'] == 'finalizing':
+            instructions[self.phase] = 'Closing and checking native streams; teleop continues. Wait before K/X or N.'
         return {**recording, 'motion_phase': labels.get(self.phase,self.phase),
                 'instruction':instructions.get(self.phase,''), 'message':self.message}

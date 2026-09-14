@@ -55,9 +55,13 @@ class FakeSDK:
                 if sdk.fail_stream: raise RuntimeError("USB disconnected")
                 if not self.ids: return False, None
                 frame_id = self.ids.pop(0)
+                if isinstance(frame_id, tuple):
+                    frame_id, stamp, domain = frame_id
+                else:
+                    stamp, domain = frame_id * 33.3, "hardware_clock"
                 color = types.SimpleNamespace(get_frame_number=lambda: frame_id,
-                    get_timestamp=lambda: frame_id * 33.3,
-                    get_frame_timestamp_domain=lambda: "hardware_clock",
+                    get_timestamp=lambda: stamp,
+                    get_frame_timestamp_domain=lambda: domain,
                     get_data=lambda: Array())
                 return True, types.SimpleNamespace(get_color_frame=lambda: color)
             def stop(self):
@@ -108,6 +112,11 @@ class CameraCaptureTests(unittest.TestCase):
             specs[0]["frame_timeout_s"] = value
             with self.assertRaises(ValueError): CameraGroup(specs, lambda f: None, lambda e: None)
 
+    def test_schema_v2_fps_reaches_the_camera_stream(self):
+        specs = [dict(c, fps=15) for c in cameras()]
+        group = CameraGroup(specs, lambda row: None, lambda error: None)
+        self.assertTrue(all(c["capture_fps"] == 15 for c in group.cameras))
+
     def test_missing_serial_fails_before_any_stream_opens(self):
         group, sdk, _, _ = self.make()
         group.cameras[0]["serial"] = "missing"
@@ -133,6 +142,22 @@ class CameraCaptureTests(unittest.TestCase):
         self.assertTrue(all(p.stopped for p in sdk.pipelines))
         with self.assertRaises(RuntimeError): group.start()
 
+    def test_timestamp_domain_change_keeps_raw_times_and_opens_boundary(self):
+        group, sdk, frames, errors = self.make(FakeSDK([(1,33.3,"hardware_clock"),
+                                                      (1,100033.3,"global_time")]))
+        events=[]
+        group.on_event=events.append
+        group.start()
+        wait_until(lambda:len(frames)==6)
+        group.close()
+        rows=[f for f in frames if f["role"]=="wrist"]
+        self.assertEqual([f["clock_epoch"] for f in rows],[0,1])
+        self.assertEqual([f["device_timestamp_ms"] for f in rows],[33.3,100033.3])
+        self.assertEqual(len(events),3)
+        self.assertTrue(all(e["boundary"] for e in events))
+        self.assertEqual(events[0]["previous_timestamp_domain"],"hardware_clock")
+        self.assertEqual(events[0]["timestamp_domain"],"global_time")
+
     def test_duplicate_frames_not_fresh_and_timeout_is_reported(self):
         group, _, frames, errors = self.make(FakeSDK([1] * 100))
         group.start()
@@ -143,12 +168,20 @@ class CameraCaptureTests(unittest.TestCase):
         stats = group.diagnostics()
         self.assertTrue(all(c["duplicate_frames"] > 0 for c in stats["cameras"].values()))
 
-    def test_backwards_device_sequence_is_fault(self):
+    def test_backwards_device_sequence_opens_clock_segment_without_rewriting_time(self):
         group, _, frames, errors = self.make(FakeSDK([10, 9]))
+        events = []
+        group.on_event = events.append
         group.start()
-        wait_until(lambda: len(errors) == 3)
-        self.assertEqual(len(frames), 3)
-        self.assertTrue(all("backwards" in e["reason"] for e in errors))
+        wait_until(lambda: len(frames) == 6)
+        group.close()
+        self.assertFalse(errors)
+        self.assertEqual(len(events), 3)
+        self.assertTrue(all(e["boundary"] for e in events))
+        for role in REQUIRED_ROLES:
+            rows = [f for f in frames if f["role"] == role]
+            self.assertEqual([f["clock_epoch"] for f in rows], [0, 1])
+            self.assertEqual([f["frame_id"] for f in rows], [10, 9])
 
     def test_disconnect_and_callback_exception_are_surfaced(self):
         sdk = FakeSDK()

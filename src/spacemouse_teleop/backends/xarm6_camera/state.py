@@ -12,7 +12,7 @@ from spacemouse_teleop.backends.xarm_sdk.transport import SDKChannel
 class StatePoller:
     def __init__(self, ip, on_sample, on_error, hz=30., timeout=.05,
                  channel_factory=SDKChannel, gripper_hz=0.):
-        if not math.isfinite(hz) or hz <= 0 or not math.isfinite(gripper_hz) or gripper_hz < 0:
+        if not math.isfinite(hz) or hz < 0 or not math.isfinite(gripper_hz) or gripper_hz < 0 or hz + gripper_hz <= 0:
             raise ValueError("State frequencies must be finite and positive (gripper may be zero)")
         self.ip, self.hz, self.timeout = ip, hz, timeout
         self.on_sample, self.on_error = on_sample, on_error
@@ -22,7 +22,7 @@ class StatePoller:
         self.sequences = defaultdict(int)
 
     def start(self):
-        targets = [("robot-state", self.hz, False)]
+        targets = [("robot-state", self.hz, False)] if self.hz else []
         if self.gripper_hz:
             targets.append(("gripper-state-readonly", self.gripper_hz, True))
         try:
@@ -100,13 +100,25 @@ class ObservedChannel:
 
     def gripper_status(self):
         started = time.monotonic()
-        result = self.channel.gripper_status()
         try:
-            self.publish({"kind": "gripper", "sequence": self.next_sequence(), "valid": True,
+            result = self.channel.gripper_status()
+        except Exception as exc:
+            finished = time.monotonic()
+            self._publish_gripper(started, finished, {}, False, str(exc))
+            raise
+        finished = result.get("received_at", time.monotonic())
+        position = result.get("position_pulse")
+        valid = isinstance(position, (int, float)) and math.isfinite(position)
+        self._publish_gripper(started, finished, dict(result), valid,
+                              None if valid else "Invalid actual gripper position")
+        return result
+
+    def _publish_gripper(self, started, finished, values, valid, error):
+        try:
+            self.publish({"kind": "gripper", "sequence": self.next_sequence(), "valid": valid,
                           "source": "existing_gripper_worker", "device_sequence": None,
-                          "query_started_at": started, "query_finished_at": result["received_at"],
-                          "received_at": result["received_at"], "values": dict(result)})
+                          "query_started_at": started, "query_finished_at": finished,
+                          "received_at": finished, "values": values, "error": error})
         except Exception:
             # The collection sink owns fault reporting, never motion control.
             pass
-        return result

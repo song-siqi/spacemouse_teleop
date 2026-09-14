@@ -36,7 +36,7 @@ def _window(updates, events, quit_event):
                     panels.append(panel)
                 canvas = np.concatenate(panels, axis=1)
                 banner = np.zeros((120,1440,3),dtype=np.uint8)
-                lines = [f"Motion: {status.get('motion_phase')} | Record: {status.get('state')} | Episode: {status.get('episode_id')} | Samples: {status.get('frame_count',0)}",
+                lines = [f"Motion: {status.get('motion_phase')} | Record: {status.get('state')} | Episode: {status.get('episode_id')} | Frames: {status.get('frame_counts',{})} | Robot: {status.get('state_counts',{}).get('robot',0)}",
                          'Space: start/end | K: keep | X: discard | N: open gripper + reset | Q: stop robot and exit',
                          str(status.get('error') or status.get('instruction') or status.get('message') or '')[:170]]
                 for index,line in enumerate(lines):

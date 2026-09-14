@@ -45,7 +45,7 @@ def _specs(cameras: list[dict], required_roles) -> list[dict]:
             raise ValueError(f"Camera role {role!r} has no serial binding; use the camera preview to bind it.")
         spec = {"role": role, "serial": serial}
         for key, default in (("width", 640), ("height", 480), ("capture_fps", 30)):
-            value = camera.get(key, default)
+            value = camera.get(key, camera.get("fps", default) if key == "capture_fps" else default)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"Camera {role}: {key} must be a positive integer.")
             spec[key] = value
@@ -73,6 +73,46 @@ def _percentiles(values):
     return {"median": at(.5), "p95": at(.95), "p99": at(.99), "max": values[-1]}
 
 
+
+FRAME_METADATA_DEFINITIONS = {
+    "frame_timestamp": {"unit": "us", "event": "device readout/transmission start"},
+    "sensor_timestamp": {"unit": "us", "event": "device-calculated exposure midpoint"},
+    "actual_exposure": {"unit": "us", "event": "exposure duration"},
+    "time_of_arrival": {"unit": None, "event": "system arrival; unit not verified locally"},
+    "backend_timestamp": {"unit": None, "event": "UVC backend; unit/event not verified locally"},
+    "actual_fps": {"unit": "fps_times_1000", "event": "device-reported frame rate"},
+}
+
+def read_frame_metadata(rs, color):
+    result = {}
+    for name, definition in FRAME_METADATA_DEFINITIONS.items():
+        token = getattr(getattr(rs, "frame_metadata_value", None), name, None)
+        item = {**definition, "available": False, "raw": None}
+        try:
+            if token is not None and color.supports_frame_metadata(token):
+                item.update(available=True, raw=int(color.get_frame_metadata(token)))
+        except Exception as exc:
+            item["error"] = str(exc)
+        result[name] = item
+    return result
+
+def capture_identity(rs, profile):
+    info = {"global_time_enabled": [], "metadata_definition": "librealsense v2.58.4 rs_frame.h",
+            "mapping": "SDK mapping if global_time; calibration uncertainty unknown"}
+    try:
+        device = profile.get_device()
+        for name in ("firmware_version", "name", "serial_number"):
+            token = getattr(rs.camera_info, name)
+            info[name] = device.get_info(token) if device.supports(token) else None
+        option = getattr(getattr(rs, "option", None), "global_time_enabled", None)
+        for sensor in device.query_sensors():
+            if option is not None and sensor.supports(option):
+                info["global_time_enabled"].append(sensor.get_option(option))
+    except Exception as exc:
+        info["availability_note"] = str(exc)
+    return info
+
+
 class CameraGroup:
     """One RGB capture worker per serial; callbacks must be quick and nonblocking.
 
@@ -84,11 +124,12 @@ class CameraGroup:
 
     def __init__(self, cameras: list[dict], on_frame: Callable[[dict], None],
                  on_error: Callable[[dict], None], *, required_roles=REQUIRED_ROLES,
-                 history_size=120, rs_module=None, numpy_module=None):
+                 history_size=32, rs_module=None, numpy_module=None, on_event=None):
         self.cameras = _specs(cameras, required_roles)
         if isinstance(history_size, bool) or not isinstance(history_size, int) or history_size < 1:
             raise ValueError("history_size must be a positive integer.")
         self.on_frame, self.on_error = on_frame, on_error
+        self.on_event = on_event or (lambda event: None)
         self._rs, self._np = rs_module, numpy_module
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -144,9 +185,11 @@ class CameraGroup:
             config.enable_device(spec["serial"])
             config.enable_stream(self._rs.stream.color, spec["width"], spec["height"],
                                  self._rs.format.rgb8, spec["capture_fps"])
-            pipeline.start(config)
+            profile = pipeline.start(config)
+            camera_info = capture_identity(self._rs, profile)
             started = True
             last_received, last_id, sequence = time.monotonic(), None, 0
+            last_timestamp, last_domain, epoch = None, None, 0
             while not self._stop.is_set():
                 found, frames = pipeline.try_wait_for_frames(100)
                 received_at = time.monotonic()
@@ -160,13 +203,30 @@ class CameraGroup:
                 if not color:
                     continue
                 frame_id = int(color.get_frame_number())
-                if last_id is not None and frame_id == last_id:
+                timestamp = float(color.get_timestamp())
+                domain = str(color.get_frame_timestamp_domain())
+                if last_id is not None and frame_id == last_id and domain == last_domain and timestamp == last_timestamp:
                     with self._lock:
                         self._counts[spec["role"]]["duplicate_frames"] += 1
+                    self.on_event({"event": "duplicate_camera_frame", "source": spec["role"],
+                                   "frame_id": frame_id, "received_at": received_at})
                     continue
-                if last_id is not None and frame_id < last_id:
-                    raise RuntimeError(f"Device frame sequence moved backwards: {last_id} -> {frame_id}")
-                timestamp = float(color.get_timestamp())
+                if ((last_id is not None and frame_id < last_id) or
+                    (last_timestamp is not None and timestamp < last_timestamp) or
+                    (last_domain is not None and domain != last_domain)):
+                    epoch += 1
+                    self.on_event({"event": "source_clock_reset", "source": spec["role"],
+                                   "frame_id": frame_id, "received_at": received_at,
+                                   "clock_epoch": epoch, "boundary": True,
+                                   "previous_frame_id": last_id,
+                                   "previous_device_timestamp_ms": last_timestamp,
+                                   "device_timestamp_ms": timestamp,
+                                   "previous_timestamp_domain": last_domain,
+                                   "timestamp_domain": domain})
+                if last_id is not None and frame_id > last_id + 1:
+                    self.on_event({"event": "device_frame_gap", "source": spec["role"],
+                                   "previous_frame_id": last_id, "frame_id": frame_id,
+                                   "missing_count": frame_id - last_id - 1, "received_at": received_at})
                 if not math.isfinite(timestamp):
                     raise RuntimeError("Camera device timestamp is not finite")
                 rgb = self._np.asanyarray(color.get_data()).copy()
@@ -180,8 +240,11 @@ class CameraGroup:
                 frame = {key: spec[key] for key in ("role", "serial", "width", "height", "capture_fps")}
                 frame.update(frame_id=frame_id, sequence=sequence, received_at=received_at,
                              device_timestamp_ms=timestamp,
-                             timestamp_domain=str(color.get_frame_timestamp_domain()), rgb=rgb)
+                             timestamp_domain=domain, clock_id=f"camera:{spec['serial']}",
+                             clock_epoch=epoch, frame_metadata=read_frame_metadata(self._rs, color),
+                             camera_info=camera_info, rgb=rgb)
                 last_received, last_id = received_at, frame_id
+                last_timestamp, last_domain = timestamp, domain
                 self._publish(frame)
         except Exception as exc:
             if not self._stop.is_set():
@@ -257,7 +320,8 @@ class MockCameraGroup(CameraGroup):
                 frame = {key: spec[key] for key in ("role", "serial", "width", "height", "capture_fps")}
                 frame.update(frame_id=sequence, sequence=sequence, received_at=received_at,
                              device_timestamp_ms=received_at * 1000,
-                             timestamp_domain="mock_host_monotonic", rgb=rgb)
+                             timestamp_domain="mock_host_monotonic", clock_id=f"mock_camera:{spec['serial']}",
+                             clock_epoch=0, frame_metadata={}, camera_info={"mock": True}, rgb=rgb)
                 self._publish(frame)
                 deadline += 1. / spec["capture_fps"]
                 if deadline < time.monotonic():

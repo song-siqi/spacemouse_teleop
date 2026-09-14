@@ -1,42 +1,46 @@
 {
-  "schema_version": 1,
   "robot_config": "spacemouse_xarm6_demo.json",
   "output_root": "../data/collections",
-  "sample_hz": 20,
-  "robot_poll_hz": 30,
   "cameras": [
     {
       "role": "wrist",
       "serial": "215122252880",
       "width": 640,
       "height": 480,
-      "fps": 30
+      "fps": 60
     },
     {
       "role": "fixed_1",
       "serial": "311322303615",
       "width": 640,
       "height": 480,
-      "fps": 30
+      "fps": 60
     },
     {
       "role": "fixed_2",
       "serial": "311322303806",
       "width": 640,
       "height": 480,
-      "fps": 30
+      "fps": 60
     }
   ],
-  "quality": {
-    "max_camera_age_s": 0.1,
-    "max_robot_age_s": 0.1,
-    "max_gripper_age_s": 0.12,
-    "max_camera_skew_s": 0.05
-  },
-  "quality_validation": "passed_2026-09-09_static_60s_and_single_teleop_64.35s; multi_episode_and_simultaneous_arm_gripper_motion_pending",
-  "queue_size": 128,
   "min_free_bytes": 10737418240,
+  "schema_version": 2,
+  "robot_state_source": "tcp30000",
+  "pre_roll_s": 0.5,
+  "post_roll_s": 0.5,
+  "source_timeout_s": 1.0,
+  "clock_interval_s": 1.0,
+  "queues": {
+    "video": 64,
+    "states": 4096,
+    "session": 4096
+  },
   "visual_storage": {
-    "mode": "video_after_episode"
+    "mode": "native_video",
+    "crf": 18,
+    "preset": "veryfast",
+    "threads_per_camera": 2,
+    "gop": 30
   }
 }

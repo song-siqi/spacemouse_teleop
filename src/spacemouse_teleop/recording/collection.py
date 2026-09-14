@@ -1,731 +1,534 @@
-"""Independent, bounded raw collection; publishers never perform filesystem work.
-
-Times in this module are host ``time.monotonic()`` seconds. Camera device clocks
-are retained as provenance, never subtracted from the host clock. The recorder
-does not own, enable, reset or stop a robot.
-"""
+"""Event-driven raw v3 recording. No observation grid or training processing."""
 from __future__ import annotations
-
 import copy
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import json
 import math
-import os
+from pathlib import Path
 import queue
 import re
 import shutil
 import threading
 import time
 import uuid
-from collections import deque
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
 
-from .visual import storage_config, video_preflight, VIDEO_SETTINGS
-from .archive import ArchiveJob, atomic_json
-
+from .archive import atomic_json, sync_directory
+from .clocks import ClockSampler
+from .native_writer import (SessionWriter, StateStreamWriter, VideoStreamWriter,
+                            StreamingVideo, NATIVE_VIDEO_SETTINGS, inspect_surviving_video)
+from .visual import video_preflight, VideoRunner, file_sha256
+from spacemouse_teleop.backends.xarm6_camera.report import REPORT_SEMANTICS
 
 ROLES = ("wrist", "fixed_1", "fixed_2")
-REQUIRED_STATES = ("joints", "tcp", "gripper")
-DEFAULT_QUALITY = {
-    "max_camera_age_s": 0.1,
-    "max_robot_age_s": 0.1,
-    "max_gripper_age_s": 0.15,
-    "max_camera_skew_s": 0.05,
-}
-
 
 class CollectionFault(RuntimeError):
-    """An episode cannot represent a complete continuous observation stream."""
+    pass
 
-
-def _finite(value):
-    if isinstance(value, float):
-        return math.isfinite(value)
-    if isinstance(value, dict):
-        return all(_finite(item) for item in value.values())
-    if isinstance(value, (list, tuple)):
-        return all(_finite(item) for item in value)
-    return True
-
+def _number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 def _json_safe(value):
-    """Keep malformed-input evidence JSON compatible without inventing zeros."""
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value): return None
+    if isinstance(value, dict): return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)): return [_json_safe(v) for v in value]
     return value
-
-
-def _number(value):
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-
-
-def _latest_before(history, timestamp):
-    for value in reversed(history):
-        if value["received_at"] <= timestamp:
-            return value
-    return None
-
-
-def validate_state(sample):
-    """Validate measured quantities rather than trusting a producer's valid flag."""
-    kind = sample.get("kind")
-    if kind not in (*REQUIRED_STATES, "report"):
-        raise CollectionFault(f"unknown state kind: {kind}")
-    if not isinstance(sample.get("sequence"), int) or sample["sequence"] < 0:
-        raise CollectionFault(f"{kind}: invalid source sequence")
-    if not _number(sample.get("received_at")):
-        raise CollectionFault(f"{kind}: invalid receive time")
-    if not sample.get("valid", False) or not _finite(sample):
-        raise CollectionFault(f"{kind}: invalid/non-finite state: {sample.get('error', '')}")
-    values = sample.get("values")
-    if not isinstance(values, dict):
-        raise CollectionFault(f"{kind}: missing values")
-    vector = {"joints": "joints_rad", "tcp": "tcp_mm_rad"}.get(kind)
-    if vector and (not isinstance(values.get(vector), (list, tuple))
-                   or len(values[vector]) != 6 or not all(_number(v) for v in values[vector])):
-        raise CollectionFault(f"{kind}: {vector} must contain six finite numbers")
-    if kind == "gripper" and not _number(values.get("position_pulse")):
-        raise CollectionFault("gripper: missing actual position_pulse")
-    begin, end = sample.get("query_started_at"), sample.get("query_finished_at")
-    if begin is not None or end is not None:
-        if not (_number(begin) and _number(end) and begin <= end <= sample["received_at"]):
-            raise CollectionFault(f"{kind}: invalid query time interval")
-
-
-def align_observation(timestamp, start_time, index, states, frames, quality):
-    """Select a causal fixed-grid observation without touching arrays or the disk.
-
-    Returns the JSON row and the three selected RGB frame dictionaries. A stale
-    source is an error; identical values with a new source sequence remain valid.
-    """
-    row = {"index": index, "timestamp": timestamp,
-           "relative_time_s": timestamp - start_time, "images": {}, "sources": {}, "valid": True}
-    chosen_frames = {}
-    for kind in REQUIRED_STATES:
-        sample = _latest_before(states.get(kind, ()), timestamp)
-        if sample is None:
-            raise CollectionFault(f"missing causal {kind} sample")
-        validate_state(sample)
-        age = timestamp - sample["received_at"]
-        limit = quality["max_gripper_age_s" if kind == "gripper" else "max_robot_age_s"]
-        if age > limit + 1e-9:
-            raise CollectionFault(f"stale {kind}: age {age:.6f}s > {limit:.6f}s")
-        source = {key: sample[key] for key in (
-            "sequence", "received_at", "query_started_at", "query_finished_at") if key in sample}
-        source["age_s"] = age
-        row["sources"][kind] = source
-        if kind == "gripper":
-            row["gripper"] = copy.deepcopy(sample["values"])
-        else:
-            key = "joints_rad" if kind == "joints" else "tcp_mm_rad"
-            row[key] = list(sample["values"][key])
-    for role in ROLES:
-        frame = _latest_before(frames.get(role, ()), timestamp)
-        if frame is None:
-            raise CollectionFault(f"missing causal camera {role}")
-        age = timestamp - frame["received_at"]
-        if age > quality["max_camera_age_s"] + 1e-9:
-            raise CollectionFault(f"stale camera {role}: age {age:.6f}s")
-        metadata = {key: value for key, value in frame.items() if key != "rgb"}
-        metadata.update(file=f"images/{role}/{index:06d}.png", age_s=age)
-        row["images"][role] = metadata
-        chosen_frames[role] = frame
-    times = [frame["received_at"] for frame in chosen_frames.values()]
-    row["camera_skew_s"] = max(times) - min(times)
-    if row["camera_skew_s"] > quality["max_camera_skew_s"] + 1e-9:
-        raise CollectionFault(f"camera receive-time skew {row['camera_skew_s']:.6f}s")
-    return row, chosen_frames
-
 
 @dataclass
 class _Episode:
     identifier: str
     path: Path
     meta: dict
+    videos: dict = field(default_factory=dict)
+    states: object = None
     incomplete: bool = False
-    raw_keys: set = field(default_factory=set)
-    references: set = field(default_factory=set)
-    image_files: list = field(default_factory=list)
-    counts: dict = field(default_factory=dict)
-    native_times: dict = field(default_factory=dict)
-    source_sequences: dict = field(default_factory=dict)
-    reused: dict = field(default_factory=dict)
-    ages: dict = field(default_factory=dict)
-    skews: list = field(default_factory=list)
-    lags: list = field(default_factory=list)
-    observations: Any = None
-    raw: Any = None
-
+    errors: list = field(default_factory=list)
+    gaps: dict = field(default_factory=dict)
+    deadline: float | None = None
+    finish_queued: bool = False
 
 class CollectionRecorder:
-    """Session logs plus fixed-rate three-camera raw episodes.
-
-    ``publish_*`` and ``write`` only copy small metadata and enqueue work. Camera
-    producers must transfer owned immutable RGB arrays. Collection faults are
-    exposed through ``status()`` and never raised into a robot control caller.
-    Start/stop/disposition are asynchronous UI operations; watch ``state`` before
-    starting another episode or resetting the arm.
-    """
-    def __init__(self, output_root, task, config_snapshot, sample_hz=20, quality=None,
-                 min_free_bytes=10 * 1024**3, queue_size=128, metadata=None,
-                 *, clock=time.monotonic, frame_history=64, state_history=4096, visual_storage=None):
-        if not _number(sample_hz) or sample_hz <= 0:
-            raise ValueError("sample_hz must be finite and positive")
-        if queue_size < 4 or frame_history < 2 or state_history < 2:
-            raise ValueError("queue_size >= 4 and histories >= 2 are required")
-        self.quality = dict(DEFAULT_QUALITY if quality is None else quality)
-        if set(self.quality) != set(DEFAULT_QUALITY) or not all(
-                _number(value) and value > 0 for value in self.quality.values()):
-            raise ValueError("quality must explicitly provide four positive age/skew limits")
-        if min_free_bytes < 0:
-            raise ValueError("min_free_bytes cannot be negative")
+    """Publishers enqueue owned frames or small records; only workers touch disk."""
+    def __init__(self, output_root, task, config_snapshot, *, cameras=None,
+                 pre_roll_s=.5, post_roll_s=.5, source_timeout_s=1., clock_interval_s=1.,
+                 video_queue_size=64, state_queue_size=4096, log_queue_size=4096,
+                 min_free_bytes=10 * 1024**3, metadata=None, visual_storage=None,
+                 clock=time.monotonic, video_factory=StreamingVideo):
+        self.cameras = copy.deepcopy(cameras or config_snapshot.get("collection", {}).get("cameras", []))
+        if len(self.cameras) != 3 or {c["role"] for c in self.cameras} != set(ROLES):
+            raise ValueError("Raw v3 requires wrist, fixed_1, fixed_2 cameras")
+        for value in (pre_roll_s, post_roll_s):
+            if not _number(value) or value < 0: raise ValueError("Buffer durations must be nonnegative")
+        for value in (source_timeout_s, clock_interval_s):
+            if not _number(value) or value <= 0: raise ValueError("Source/clock intervals must be positive")
+        for value in (video_queue_size, state_queue_size, log_queue_size):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 4:
+                raise ValueError("Independent queue sizes must be integers >= 4")
+        if min_free_bytes < 0: raise ValueError("min_free_bytes must be nonnegative")
         self.output_root, self.task = Path(output_root), str(task)
+        if not self.task.strip(): raise ValueError("Task must be nonempty")
         self.config_snapshot, self.metadata = copy.deepcopy(config_snapshot), copy.deepcopy(metadata or {})
-        self.sample_hz, self.min_free_bytes, self.clock = float(sample_hz), int(min_free_bytes), clock
-        self.queue = queue.Queue(queue_size)
+        self.pre_roll_s, self.post_roll_s = float(pre_roll_s), float(post_roll_s)
+        self.source_timeout_s, self.clock_interval_s = source_timeout_s, clock_interval_s
+        self.video_queue_size, self.state_queue_size = video_queue_size, state_queue_size
+        self.log_queue_size, self.min_free_bytes = log_queue_size, min_free_bytes
+        self.visual_storage = {**NATIVE_VIDEO_SETTINGS, **(visual_storage or {})}
+        self.clock, self.video_factory = clock, video_factory
         self._lock = threading.RLock()
-        self._wake, self._stop = threading.Event(), threading.Event()
-        self._states = {kind: deque(maxlen=state_history) for kind in (*REQUIRED_STATES, "report")}
-        self._frames = {role: deque(maxlen=frame_history) for role in ROLES}
+        self._stop = threading.Event()
+        self._ops = queue.Queue(16)
+        self._history = {}
+        self._latest = {}
+        self._last_identity = {}
+        self._boundary_time = -math.inf
         self._state, self._error, self._fatal_error = "idle", None, None
-        self._active, self._last = None, None
-        self._pending_finish = None
-        self._free_bytes, self._space_checked_at = None, None
-        self._episode_number, self._next_index = 0, 0
-        self._queue_high_water, self._dropped_events = 0, 0
-        self._opened = False
-        self.thread = self.scheduler_thread = None
-        self._image_pool = None
-        self.visual_storage = storage_config(visual_storage)
+        self._active = self._last = None
+        self._episode_number = 0
+        self._free_bytes = self._space_checked_at = None
+        self._opened = self._closed = False
         self._video_tools = None
-        self._archive_job = None
-        self.session_path = None
+        self.session_path = self.thread = self.session_writer = self.clocks = None
 
     def preflight(self):
-        if self.visual_storage['mode'] == 'video_after_episode' and self._video_tools is None:
+        if self._video_tools is None:
             self._video_tools = video_preflight()
 
     def open(self):
         self.preflight()
         with self._lock:
-            if self._opened:
-                raise RuntimeError("recorder is already open")
-            safe_task = re.sub(r"[^\w.-]+", "_", self.task).strip("._") or "task"
+            if self._opened or self._closed: raise RuntimeError("Recorder can only be opened once")
+            task = re.sub(r"[^\w.-]+", "_", self.task).strip("._") or "task"
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-            self.session_path = self.output_root / safe_task / f"session_{stamp}_{uuid.uuid4().hex[:8]}"
-            (self.session_path / "episodes").mkdir(parents=True, exist_ok=False)
-            anchor = {"monotonic": self.clock(), "utc": datetime.now(timezone.utc).isoformat()}
-            self._atomic_json(self.session_path / "session.json", {
-                "format_version": 2 if self.visual_storage["mode"] == "video_after_episode" else 1,
-                "visual_storage": self.visual_storage, "task": self.task, "clock_anchor": anchor,
-                "sample_hz": self.sample_hz, "quality": self.quality,
-                "config": self.config_snapshot, "metadata": self.metadata,
-                "time_semantics": "host_monotonic_seconds; device timestamps have separate clock domains",
-            })
+            self.session_path = self.output_root / task / f"session_{stamp}_{uuid.uuid4().hex[:8]}"
+            (self.session_path / "episodes").mkdir(parents=True)
             self._free_bytes = shutil.disk_usage(self.session_path).free
             self._space_checked_at = self.clock()
+            if self._free_bytes < self.min_free_bytes:
+                raise CollectionFault("Insufficient disk reserve")
+            self._session_meta = {
+                "format_version": 3, "status": "recording", "task": self.task,
+                "session_id": self.session_path.name, "config": self.config_snapshot,
+                "metadata": self.metadata, "robot_report_semantics": REPORT_SEMANTICS,
+                "clock_semantics": {"host": "monotonic seconds, same process session",
+                    "anchors": "bracketed monotonic ns / realtime ns readings",
+                    "cross_device_mapping": "evidence only; not calibrated",
+                    "fixed_offset_uncertainty_s": None},
+                "visual_storage": self.visual_storage, "video_tools": self._video_tools,
+            }
+            atomic_json(self.session_path / "session.json", self._session_meta)
             self._opened = True
-            self.thread = threading.Thread(target=self._writer, name="collection-writer", daemon=True)
-            self.scheduler_thread = threading.Thread(target=self._scheduler, name="collection-grid", daemon=True)
+            self.session_writer = SessionWriter(self.session_path, self._session_fault, self.log_queue_size)
+            self.session_writer.start()
+            self.clocks = ClockSampler(lambda r: self.session_writer.submit("clock", r),
+                                       self.publish_event, self.clock_interval_s, on_error=self._session_fault)
+            self.clocks.start()
+            self.thread = threading.Thread(target=self._supervise, name="collection-lifecycle", daemon=True)
             self.thread.start()
-            self.scheduler_thread.start()
 
-    def _enqueue_locked(self, event):
-        # One slot belongs exclusively to an episode's finalization fence. All
-        # accepted observations/states therefore precede its finish event.
-        if self._fatal_error or self._pending_finish or self.queue.qsize() >= self.queue.maxsize - 1:
-            self._dropped_events += 1
-            self._fault_locked(self._fatal_error or "collection queue full")
-            return False
-        try:
-            self.queue.put_nowait(event)
-        except queue.Full:
-            self._dropped_events += 1
-            self._fault_locked("collection queue full")
-            return False
-        self._queue_high_water = max(self._queue_high_water, self.queue.qsize())
-        return True
+    def _session_fault(self, reason):
+        with self._lock:
+            self._fatal_error = str(reason)
+            self._fault_locked(reason)
 
     def write(self, control_event):
         try:
-            event = copy.deepcopy(control_event)
-            if not _finite(event):
-                raise CollectionFault("non-finite control log event")
-            with self._lock:
-                if self._opened and not self._stop.is_set():
-                    self._enqueue_locked(("control", event))
+            row = _json_safe(copy.deepcopy(control_event))
+            if self.session_writer: self.session_writer.submit("control", row)
         except Exception as exc:
-            self.mark_fault(f"control log: {exc}")
+            self.mark_fault(f"Control log: {exc}")
+
+    def publish_event(self, event):
+        try:
+            with self._lock:
+                row = _json_safe(copy.deepcopy(event))
+                row.setdefault("received_at", self.clock())
+                episode = self._active
+                row.setdefault("episode_id", episode.identifier if episode else None)
+                name = row.get("event", "source_event")
+                if episode and name not in ("episode_start", "episode_stop_requested", "capture_closed", "episode_finalized"):
+                    episode.gaps[name] = episode.gaps.get(name, 0) + 1
+                if self.session_writer: self.session_writer.submit("event", row)
+                if row.get("boundary"):
+                    self._boundary_locked(row.get("event", "source_boundary"), row["received_at"])
+        except Exception as exc:
+            self.mark_fault(f"Event log: {exc}")
+
+    def _boundary_locked(self, reason, now):
+        if self._active: self._finish_locked(reason, True)
+        self._boundary_time = max(self._boundary_time, now)
+        self._history.clear()
+        self._latest.clear()
+
+    def mark_boundary(self, reason="reset"):
+        self.publish_event({"event": reason, "boundary": True, "received_at": self.clock()})
+
+    def _remember_locked(self, key, value):
+        now = value["received_at"]
+        identity = (value.get("clock_epoch", 0), value["sequence"])
+        previous = self._last_identity.get(key)
+        if previous == identity:
+            self.publish_event({"event": "duplicate_source", "source": key,
+                                "sequence": value["sequence"], "received_at": now})
+            return False
+        if previous and identity[0] == previous[0] and identity[1] < previous[1]:
+            self._boundary_locked(f"{key}_sequence_reset", now)
+            self.publish_event({"event": "source_sequence_reset", "source": key, "received_at": now})
+        self._last_identity[key] = identity
+        if key in ROLES or value.get("valid") is True:
+            self._latest[key] = value
+        history = self._history.setdefault(key, deque())
+        history.append(value)
+        cutoff = max(self._boundary_time, now - self.pre_roll_s)
+        while history and history[0]["received_at"] < cutoff:
+            history.popleft()
+        # A defective clock must not create an unbounded history.
+        limit = self.state_queue_size if key not in ROLES else max(2, self.video_queue_size)
+        while len(history) > limit: history.popleft()
+        return True
 
     def publish_state(self, sample):
         try:
-            value = copy.deepcopy(sample)
-            error = None
-            try:
-                validate_state(value)
-            except Exception as exc:
-                error = str(exc)
-                value = _json_safe(value)
-                value.update(valid=False, error=error)
+            packet = sample.get("packet")
+            value = _json_safe(copy.deepcopy({k: v for k, v in sample.items() if k != "packet"}))
             kind = value.get("kind")
+            if kind not in ("robot", "gripper", "report"):
+                raise CollectionFault(f"Unsupported v3 state source: {kind}")
+            if not _number(value.get("received_at")) or not isinstance(value.get("sequence"), int):
+                raise CollectionFault("Invalid state source identity/time")
+            if kind == "robot":
+                if not isinstance(packet, bytes): raise CollectionFault("Native robot report bytes missing")
+                value["packet"] = packet
+            if kind == "gripper" and value.get("valid") and not _number(value.get("values", {}).get("position_pulse")):
+                value.update(valid=False, error="Invalid actual gripper position")
+            value.setdefault("clock_id", "host_monotonic")
+            value.setdefault("clock_epoch", 0)
+            value.setdefault("device_timestamp_raw", None)
+            value.setdefault("device_timestamp_unit", None)
             with self._lock:
-                if kind not in self._states or not _number(value.get("received_at")):
-                    self._fault_locked(error or "malformed state source")
-                    return
-                history = self._states[kind]
-                if history and value.get("sequence") == history[-1]["sequence"]:
-                    return  # A cached sample must not acquire a new timestamp.
-                if history and (not isinstance(value.get("sequence"), int)
-                                or value["sequence"] < history[-1]["sequence"]
-                                or value["received_at"] < history[-1]["received_at"]):
-                    self._fault_locked(f"{kind}: source sequence/time went backwards")
-                    return
-                history.append(value)
-                if self._active:
-                    self._enqueue_locked(("raw", self._active, value))
-                if error:
-                    self._fault_locked(error)
+                if not self._opened or self._closed: return
+                if not self._remember_locked(kind, value): return
+                if not value.get("valid", False):
+                    self.publish_event({"event": "invalid_state", "source": kind,
+                                        "sequence": value["sequence"], "received_at": value["received_at"]})
+                episode = self._active
+                if self._admit_locked(episode, value["received_at"]):
+                    if not episode.states.submit(value):
+                        self._overflow_locked(kind, value)
         except Exception as exc:
-            self.mark_fault(f"state publisher: {exc}")
+            self.mark_fault(f"State publisher: {exc}")
 
     def publish_frame(self, frame):
         try:
-            value = dict(frame)
+            value = {k: (_json_safe(copy.deepcopy(v)) if k != "rgb" else v) for k, v in frame.items()}
             role, rgb = value.get("role"), value.get("rgb")
-            required = ("serial", "frame_id", "sequence", "received_at", "device_timestamp_ms",
-                        "timestamp_domain", "width", "height", "capture_fps")
-            if role not in ROLES or any(key not in value for key in required):
-                raise CollectionFault("camera frame metadata is incomplete")
-            if not _number(value["received_at"]) or not _number(value["device_timestamp_ms"]):
-                raise CollectionFault(f"{role}: invalid camera timestamp")
-            if not isinstance(value["sequence"], int) or not isinstance(value["frame_id"], int):
-                raise CollectionFault(f"{role}: invalid frame sequence")
-            if getattr(rgb, "shape", None) != (value["height"], value["width"], 3) or str(getattr(rgb, "dtype", "")) != "uint8":
-                raise CollectionFault(f"{role}: frame must be owned RGB uint8 HxWx3")
+            spec = next((c for c in self.cameras if c["role"] == role), None)
+            if spec is None or value.get("serial") != spec["serial"]:
+                raise CollectionFault("Camera role/serial differs from capture configuration")
+            if not _number(value.get("received_at")) or not _number(value.get("device_timestamp_ms")):
+                raise CollectionFault("Invalid camera timestamps")
+            if any(not isinstance(value.get(k), int) for k in ("sequence", "frame_id")):
+                raise CollectionFault("Invalid camera sequence")
+            if (getattr(rgb, "shape", None) != (spec["height"], spec["width"], 3)
+                    or str(getattr(rgb, "dtype", "")) != "uint8"):
+                raise CollectionFault("Camera RGB dimensions/type differ from configuration")
+            value.setdefault("clock_id", f"camera:{value['serial']}")
+            value.setdefault("clock_epoch", 0)
             with self._lock:
-                history = self._frames[role]
-                if history:
-                    previous = history[-1]
-                    if previous["serial"] != value["serial"]:
-                        raise CollectionFault(f"{role}: camera serial changed during session")
-                    if value["sequence"] == previous["sequence"] or value["frame_id"] == previous["frame_id"]:
-                        return
-                    if value["sequence"] < previous["sequence"] or value["received_at"] < previous["received_at"]:
-                        raise CollectionFault(f"{role}: camera sequence/time went backwards")
-                history.append(value)
+                if not self._opened or self._closed: return
+                if not self._remember_locked(role, value): return
+                episode = self._active
+                if self._admit_locked(episode, value["received_at"]):
+                    if not episode.videos[role].submit(value):
+                        self._overflow_locked(role, value)
         except Exception as exc:
-            self.mark_fault(f"camera publisher: {exc}")
+            self.mark_fault(f"Camera publisher: {exc}")
+
+    def _admit_locked(self, episode, received):
+        return (episode is not None and received >= episode.meta["capture_requested_start_time"]
+                and (episode.meta["capture_requested_end_time"] is None or
+                     received <= episode.meta["capture_requested_end_time"]))
+
+    def _overflow_locked(self, source, value):
+        self.publish_event({"event": "queue_overflow", "source": source,
+                            "sequence": value["sequence"], "received_at": self.clock()})
+        self._fault_locked(f"{source} recording queue full")
 
     def start_episode(self):
-        """Return an episode id, or None and an explanatory status error."""
-        try:
-            with self._lock:
-                if not self._opened or self._stop.is_set() or self._fatal_error:
-                    self._error = self._fatal_error or "recorder is not open"
+        with self._lock:
+            if not self._opened or self._closed or self._fatal_error:
+                self._error = self._fatal_error or "Recorder is not open"
+                return None
+            if self._state != "idle":
+                self._error = "End and keep/discard the current episode before starting another"
+                return None
+            if self._free_bytes is None or self._free_bytes < self.min_free_bytes:
+                self._error = "Insufficient disk reserve"
+                return None
+            now = self.clock()
+            for key in (*ROLES, "robot", "gripper"):
+                item = self._latest.get(key)
+                if item is None or item["received_at"] < self._boundary_time or not 0 <= now - item["received_at"] <= self.source_timeout_s:
+                    self._error = f"Waiting for live source: {key}"
                     return None
-                if self._state != "idle":
-                    self._error = "finish and keep/discard the current episode before starting another"
+                if key not in ROLES and not item.get("valid"):
+                    self._error = f"Waiting for valid source: {key}"
                     return None
-                # The coordinator calls this method in the motion loop. Disk
-                # space is read only at open() and by the writer, never here.
-                if self._free_bytes is None or self._free_bytes < self.min_free_bytes:
-                    self._error = "insufficient disk space to begin recording"
-                    return None
-                now = self.clock()
-                align_observation(now, now, 0, self._states, self._frames, self.quality)
-                self._episode_number += 1
-                identifier = f"episode_{self._episode_number:06d}"
-                meta = {
-                    "format_version": 2 if self.visual_storage["mode"] == "video_after_episode" else 1,
-                    "episode_id": identifier, "task": self.task,
-                    "sample_hz": self.sample_hz, "required_camera_roles": list(ROLES),
+            self._episode_number += 1
+            identifier = f"episode_{self._episode_number:06d}"
+            meta = {"format_version": 3, "episode_id": identifier, "task": self.task,
                     "status": "recording", "disposition": "pending", "start_time": now,
-                    "end_time": None, "end_reason": None, "frame_count": 0,
-                    "session_log": "../../control.jsonl", "session_metadata": "../../session.json",
-                    "config": self.config_snapshot, "metadata": self.metadata, "quality": self.quality,
-                    "units": {"joints_rad": "rad", "tcp_mm_rad": ["mm", "mm", "mm", "rad", "rad", "rad"],
-                              "gripper.position_pulse": "SDK raw pulse", "timestamp": "host monotonic seconds"},
-                    "tcp_frame": "robot base; TCP definition in captured real config", "stats": {},
-                }
-                if self.visual_storage['mode'] == 'video_after_episode':
-                    meta.update(capture_complete=False, visual_storage={**VIDEO_SETTINGS,'fps':self.sample_hz},
-                                archive={'phase':'recording','cleanup_pending':True})
-                episode = _Episode(identifier, self.session_path / "episodes" / identifier, meta)
-                self._active = self._last = episode
-                self._state, self._error, self._next_index = "recording", None, 0
-                predecessors = [copy.deepcopy(sample) for history in self._states.values()
-                                if (sample := _latest_before(history, now)) is not None]
-                if not self._enqueue_locked(("begin", episode, predecessors)):
-                    return None
-                self._wake.set()
-                return identifier
-        except Exception as exc:
-            with self._lock:
-                self._error = str(exc)
-            return None
-
-    def _end_locked(self, reason, incomplete):
-        episode = self._active
-        if episode is None:
-            return False
-        episode.incomplete |= bool(incomplete)
-        episode.meta.update(end_time=self.clock(), end_reason=str(reason))
-        self._active = None
-        self._state = "finalizing"
-        # Reserved slot normally guarantees this fence follows accepted events.
-        # Keep one out-of-band fence if that invariant is ever violated: future
-        # producers are then rejected until the queue drains, preserving order.
-        try:
-            self.queue.put_nowait(("finish", episode))
-        except queue.Full:
-            episode.incomplete = True
-            episode.meta["end_reason"] = "collection queue full during finalization"
-            self._error = episode.meta["end_reason"]
-            self._pending_finish = episode
-        self._wake.set()
-        return True
+                    "end_time": None, "end_reason": None, "capture_start_time": None,
+                    "capture_end_time": None,
+                    "capture_requested_start_time": max(self._boundary_time, now - self.pre_roll_s),
+                    "capture_requested_end_time": None, "pre_roll_s": self.pre_roll_s,
+                    "post_roll_s": self.post_roll_s, "cameras": self.cameras,
+                    "visual_storage": self.visual_storage, "video_tools": self._video_tools, "metadata": self.metadata,
+                    "config": self.config_snapshot, "robot_report_semantics": REPORT_SEMANTICS,
+                    "session_metadata": "../../session.json", "session_log": "../../control.jsonl",
+                    "session_events": "../../events.jsonl", "clock_anchors": "../../clock_anchors.jsonl",
+                    "clock_mapping_status": "evidence_only_not_calibrated",
+                    "fixed_offset_uncertainty_s": None}
+            episode = _Episode(identifier, self.session_path / "episodes" / identifier, meta)
+            failed = lambda reason: self._writer_fault(episode, reason)
+            episode.states = StateStreamWriter(episode, failed, self.state_queue_size)
+            episode.videos = {c["role"]: VideoStreamWriter(episode, c["role"], c,
+                self.visual_storage, failed, self.video_queue_size, self.video_factory) for c in self.cameras}
+            self._active = self._last = episode
+            self._state, self._error = "recording", None
+            self._ops.put_nowait(("begin", episode))
+            for key, history in self._history.items():
+                for value in history:
+                    if not self._admit_locked(episode, value["received_at"]): continue
+                    writer = episode.videos[key] if key in ROLES else episode.states
+                    if not writer.submit(value):
+                        self._overflow_locked(key, value)
+                        return None
+            self.publish_event({"event": "episode_start", "received_at": now})
+            return identifier
 
     def stop_episode(self, reason="user", incomplete=False):
-        try:
-            with self._lock:
-                return self._end_locked(reason, incomplete)
-        except Exception as exc:
-            self.mark_fault(f"episode finalization: {exc}")
-            return False
+        with self._lock:
+            if not self._active: return False
+            episode = self._active
+            if incomplete:
+                self._finish_locked(reason, True)
+            elif episode.meta["end_time"] is None:
+                now = self.clock()
+                episode.meta.update(end_time=now, end_reason=str(reason),
+                                    capture_requested_end_time=now + self.post_roll_s)
+                self._state = "postroll"
+                self.publish_event({"event": "episode_stop_requested", "received_at": now})
+                if self.post_roll_s == 0: self._finish_locked(reason, False)
+            return True
+
+    def _finish_locked(self, reason, incomplete):
+        episode = self._active
+        if episode is None: return
+        now = self.clock()
+        episode.incomplete |= incomplete
+        if episode.meta["end_time"] is None:
+            episode.meta.update(end_time=now, end_reason=str(reason))
+        if incomplete:
+            episode.meta.update(end_reason=str(reason), capture_requested_end_time=now)
+        if episode.meta["capture_requested_end_time"] is None:
+            episode.meta["capture_requested_end_time"] = now
+        episode.deadline = time.monotonic() + max(120., 2 * (now - episode.meta["start_time"]))
+        self._active = None
+        self._boundary_time = max(self._boundary_time, now)
+        self._history.clear()
+        self._state = "finalizing"
+        self.publish_event({"event": "capture_closed", "episode_id": episode.identifier,
+                            "received_at": now, "reason": str(reason), "incomplete": incomplete})
+        if not episode.finish_queued:
+            episode.finish_queued = True
+            self._ops.put_nowait(("finish", episode))
+
+    def _writer_fault(self, episode, reason):
+        with self._lock:
+            episode.incomplete = True
+            episode.errors.append(str(reason))
+            self._error = str(reason)
+            if self._active is episode: self._finish_locked(reason, True)
 
     def _fault_locked(self, reason):
         self._error = str(reason)
-        self._end_locked(reason, True)
+        if self._active:
+            self._active.errors.append(str(reason))
+            self._finish_locked(reason, True)
 
     def mark_fault(self, reason):
-        try:
-            with self._lock:
-                self._fault_locked(reason)
-        except Exception:
-            # This method is deliberately safe in SDK query/control callbacks.
-            self._error = str(reason)
+        with self._lock:
+            self.publish_event({"event": "source_fault", "reason": _json_safe(reason), "received_at": self.clock()})
+            self._fault_locked(str(reason))
+            self._boundary_time = self.clock()
+            self._history.clear()
+            self._latest.clear()
 
     def disposition(self, value):
-        if value not in ("kept", "discarded"):
-            raise ValueError("disposition must be kept or discarded")
+        if value not in ("kept", "discarded"): raise ValueError("Expected kept/discarded")
         with self._lock:
-            if self._state not in ("review", "fault") or self._last is None or self._fatal_error:
-                return False
-            if not self._enqueue_locked(("disposition", self._last, value)):
-                return False
+            if self._state not in ("review", "fault") or self._last is None: return False
             self._state = "finalizing"
+            self._ops.put_nowait(("disposition", (self._last, value)))
             return True
 
     def status(self):
         with self._lock:
             episode = self._last
+            frames = {r: w.count for r, w in episode.videos.items()} if episode else dict.fromkeys(ROLES, 0)
+            captured = {r: w.accepted for r, w in episode.videos.items()} if episode else dict.fromkeys(ROLES, 0)
             return {"state": self._state, "error": self._error, "fatal_error": self._fatal_error,
                     "episode_id": episode.identifier if episode else None,
                     "path": str(episode.path) if episode else None,
                     "session_path": str(self.session_path) if self.session_path else None,
-                    "frame_count": episode.meta["frame_count"] if episode else 0,
+                    "frame_counts": frames, "captured_frame_counts": captured,
+                    "frame_count": sum(frames.values()),
+                    "state_counts": dict(episode.states.counts) if episode else {},
+                    "gaps": dict(episode.gaps) if episode else {},
+                    "complete": bool(episode and episode.meta["status"] == "complete"),
                     "disposition": episode.meta["disposition"] if episode else None,
-                    "complete": episode.meta["status"] == "complete" if episode else False,
-                    "queue_size": self.queue.qsize(), "queue_high_water": self._queue_high_water,
-                    "dropped_events": self._dropped_events, "free_bytes": self._free_bytes,
-                    "space_checked_at": self._space_checked_at,
-                    "archive": self._archive_job.snapshot() if self._archive_job and not self._archive_job.finished.is_set()
-                               else copy.deepcopy(episode.meta.get('archive',{})) if episode else {},
-                    "finalization_deadline": self._archive_job.runner.deadline if self._archive_job and not self._archive_job.finished.is_set() else None,
-                    "finalization_remaining_s": self._archive_job.remaining if self._archive_job and not self._archive_job.finished.is_set()
-                                                else 30.}
+                    "free_bytes": self._free_bytes, "space_checked_at": self._space_checked_at,
+                    "finalization_deadline": episode.deadline if episode else None,
+                    "finalization_remaining_s": max(0., episode.deadline - time.monotonic()) if episode and episode.deadline else 30.}
 
-    def _scheduler(self):
-        period = 1.0 / self.sample_hz
-        while not self._stop.is_set():
-            delay = min(period, 0.05)
-            try:
-                with self._lock:
-                    episode = self._active
-                    if episode is not None:
-                        grid = episode.meta["start_time"] + self._next_index * period
-                        now = self.clock()
-                        if now < grid:
-                            delay = min(grid - now, .05)
-                        else:
-                            delay = 0
-                            # A late tick may use history, but never squeeze several
-                            # missed grid points into a burst or relabel time.
-                            if now - grid >= period:
-                                raise CollectionFault(f"missed observation grid: {now - grid:.6f}s late")
-                            row, frames = align_observation(grid, episode.meta["start_time"], self._next_index,
-                                                            self._states, self._frames, self.quality)
-                            row["scheduler_lag_s"] = now - grid
-                            if self._enqueue_locked(("observation", episode, row, frames)):
-                                self._next_index += 1
-            except Exception as exc:
-                self.mark_fault(str(exc))
-            if delay:
-                self._wake.wait(delay)
-                self._wake.clear()
-
-    _atomic_json = staticmethod(atomic_json)
-
-    @staticmethod
-    def _line(handle, value):
-        handle.write(json.dumps(value, allow_nan=False, sort_keys=True) + "\n")
-
-    def _refresh_disk_space(self):
-        # Filesystem work belongs to the writer (or pre-motion open phase).
-        available = shutil.disk_usage(self.session_path).free
-        with self._lock:
-            self._free_bytes, self._space_checked_at = available, self.clock()
-            if available < self.min_free_bytes:
-                self._fault_locked("disk free space fell below recording reserve")
-
-    def _begin(self, episode, predecessors):
-        episode.path.mkdir(parents=True, exist_ok=False)
-        self._atomic_json(episode.path / "meta.json", episode.meta)
-        episode.observations = (episode.path / "observations.jsonl").open("w", encoding="utf-8")
-        episode.raw = (episode.path / "raw_states.jsonl").open("w", encoding="utf-8")
-        for role in ROLES:
-            (episode.path / ('_staging/images' if episode.meta['format_version'] == 2 else 'images') / role).mkdir(parents=True)
-        for sample in predecessors:
-            self._raw(episode, sample)
-        self._refresh_disk_space()
-
-    def _raw(self, episode, sample):
-        key = sample["kind"], sample["sequence"]
-        if key not in episode.raw_keys:
-            self._line(episode.raw, sample)
-            episode.raw_keys.add(key)
-            episode.counts[sample["kind"]] = episode.counts.get(sample["kind"], 0) + 1
-            episode.native_times.setdefault(sample["kind"], []).append(sample["received_at"])
-
-    @staticmethod
-    def _save_rgb(path, rgb):
-        import cv2
-        if not cv2.imwrite(str(path), rgb[:, :, ::-1], [cv2.IMWRITE_PNG_COMPRESSION, 1]):
-            raise OSError(f"PNG encoder failed: {path}")
-
-    def _observation(self, episode, row, frames):
-        if row["index"] != episode.meta["frame_count"]:
-            raise CollectionFault("observation index is not continuous")
-        # Three fixed encoders share this one observation. The writer never
-        # queues another observation until all three are done, bounding images
-        # in flight and preserving image-before-index ordering.
-        pending = []
-        for role, frame in frames.items():
-            relative = row["images"][role]["file"]
-            if episode.meta['format_version'] == 2:
-                relative = f'_staging/images/{role}/{row["index"]:06d}.png'
-                row['images'][role].update(file=f'videos/{role}.mp4',video_frame_index=row['index'],
-                                           video_pts_s=row['index']/self.sample_hz)
-            pending.append((relative, self._image_pool.submit(self._save_rgb, episode.path / relative, frame["rgb"])))
-        for relative, future in pending:
-            future.result()
-            episode.image_files.append(relative)
-        # An index row only becomes visible after its images have been written.
-        self._line(episode.observations, row)
-        for kind, source in row["sources"].items():
-            episode.references.add((kind, source["sequence"]))
-            if episode.source_sequences.get(kind) == source["sequence"]:
-                episode.reused[kind] = episode.reused.get(kind, 0) + 1
-            episode.source_sequences[kind] = source["sequence"]
-            episode.ages.setdefault(kind, []).append(source["age_s"])
-        for role, source in row["images"].items():
-            if episode.source_sequences.get(role) == source["sequence"]:
-                episode.reused[role] = episode.reused.get(role, 0) + 1
-            episode.source_sequences[role] = source["sequence"]
-            episode.ages.setdefault(role, []).append(source["age_s"])
-        episode.skews.append(row["camera_skew_s"])
-        episode.lags.append(row["scheduler_lag_s"])
-        episode.meta["frame_count"] += 1
-
-    @staticmethod
-    def _distribution(values):
-        if not values:
-            return {"count": 0}
-        ordered = sorted(values)
-        def percentile(fraction):
-            return ordered[min(len(ordered) - 1, math.ceil(len(ordered) * fraction) - 1)]
-        return {"count": len(values), "median": percentile(.5), "p95": percentile(.95),
-                "p99": percentile(.99), "max": ordered[-1]}
+    def _begin(self, episode):
+        episode.path.mkdir(parents=True)
+        (episode.path / "videos").mkdir()
+        (episode.path / "frames").mkdir()
+        atomic_json(episode.path / "meta.json", episode.meta)
+        episode.states.thread.start()
+        for writer in episode.videos.values(): writer.thread.start()
 
     def _finish(self, episode):
-        for handle in (episode.observations, episode.raw):
-            if handle and not handle.closed:
-                handle.flush()
-                os.fsync(handle.fileno())
-                handle.close()
-        failures = []
-        if not episode.meta["frame_count"]:
-            failures.append("episode has no observations")
-        if episode.references - episode.raw_keys:
-            failures.append("observation references missing native state samples")
-        if any(not (episode.path / relative).is_file() for relative in episode.image_files):
-            failures.append("observation references missing images")
-        if failures:
-            episode.incomplete = True
-            episode.meta["integrity_errors"] = failures
-        episode.meta["status"] = "incomplete" if episode.incomplete else "complete"
-        count = episode.meta["frame_count"]
-        episode.meta["stats"] = {
-            "raw_sample_count": episode.counts,
-            "native_source_timing": {
-                kind: {"response_hz": (len(times) - 1) / (times[-1] - times[0])
-                       if len(times) > 1 and times[-1] > times[0] else None,
-                       "interval_s": self._distribution([b - a for a, b in zip(times, times[1:])]),
-                       "device_update_hz": None,
-                       "note": "Host response rate does not prove internal device measurement rate"}
-                for kind, times in episode.native_times.items()
-            },
-            "sample_hz": self.sample_hz,
-            "saved_grid_span_s": max(0, count - 1) / self.sample_hz,
-            "source_age_s": {key: self._distribution(values) for key, values in episode.ages.items()},
-            "camera_skew_s": self._distribution(episode.skews),
-            "scheduler_lag_s": self._distribution(episode.lags),
-            "reused_source_count": episode.reused,
-            "reused_source_fraction": {key: episode.reused.get(key, 0) / max(1, count - 1)
-                                       for key in (*REQUIRED_STATES, *ROLES)},
-            "queue_high_water_session": self._queue_high_water,
-            "dropped_events_session": self._dropped_events,
-        }
-        if episode.meta['format_version'] == 2 and not episode.incomplete:
-            episode.meta.update(status='finalizing',capture_complete=False)
-            episode.meta['archive']['phase'] = 'checking_capture'
-            self._atomic_json(episode.path / 'meta.json', episode.meta)
-            def completed(meta, error):
-                with self._lock:
-                    if meta is not None: episode.meta = meta
-                    if error:
-                        self._error = f'video archive: {error}'
-                        self._state = 'fault'
-                    else:
-                        self._error = episode.meta.get('archive',{}).get('cleanup_warning')
-                        self._state = 'fault' if self._fatal_error else 'review'
-                self._wake.set()
-            job = ArchiveJob(episode.path,episode.meta,completed,self._video_tools)
-            with self._lock: self._archive_job = job
-            job.start()
-        else:
-            self._atomic_json(episode.path / "meta.json", episode.meta)
-            with self._lock:
-                self._state = "fault" if episode.incomplete else "review"
+        writers = [episode.states, *episode.videos.values()]
+        for writer in writers: writer.stop.set()
+        deadline = time.monotonic() + 30.
+        for writer in writers:
+            if writer.thread.ident is not None:
+                writer.thread.join(max(0., deadline - time.monotonic()))
+        for writer in episode.videos.values():
+            if writer.thread.is_alive(): writer.abort()
+        for writer in writers:
+            if writer.thread.is_alive(): writer.thread.join(6.)
+            if writer.thread.is_alive():
+                self._fatal_error = "Recording writer did not stop"
+                episode.errors.append(self._fatal_error)
+        errors = list(episode.errors) + [w.error for w in writers if w.error]
+        frame_counts = {role: writer.count for role, writer in episode.videos.items()}
+        if any(w.count != w.accepted for w in episode.videos.values()):
+            errors.append("Accepted camera frames were not all written")
+        if sum(episode.states.counts.values()) != episode.states.accepted:
+            errors.append("Accepted state records were not all written")
+        first = [w.first_time for w in episode.videos.values()] + list(episode.states.first_times.values())
+        last = [w.last_time for w in episode.videos.values()] + list(episode.states.last_times.values())
+        episode.meta.update(frame_counts=frame_counts, state_counts=dict(episode.states.counts),
+            accepted_frame_counts={r: w.accepted for r, w in episode.videos.items()},
+            accepted_state_count=episode.states.accepted,
+            capture_start_time=min((v for v in first if v is not None), default=None),
+            capture_end_time=max((v for v in last if v is not None), default=None),
+            source_ranges={**{r: {"first": w.first_time, "last": w.last_time} for r, w in episode.videos.items()},
+                           **{k: {"first": v, "last": episode.states.last_times[k]}
+                              for k, v in episode.states.first_times.items()}},
+            continuity={"events": dict(episode.gaps), "has_events": bool(episode.gaps)},
+            queue_high_water={**{r: w.high_water for r, w in episode.videos.items()},
+                              "states": episode.states.high_water},
+            errors=errors, status="incomplete" if errors or episode.incomplete else "finalizing")
+        runner = VideoRunner(episode.deadline)
+        if not errors and not episode.incomplete:
+            try:
+                from .raw import validate_native_episode
+                self.session_writer.flush()
+                report = validate_native_episode(episode.path, meta=episode.meta, check_hashes=False,
+                                                 allow_uncommitted=True, runner=runner)
+                episode.meta["validation"] = report
+                episode.meta["files"] = {str(p.relative_to(episode.path)):
+                    {"bytes": p.stat().st_size, "sha256": file_sha256(p, runner)}
+                    for p in sorted(episode.path.rglob("*")) if p.is_file() and p.name != "meta.json"}
+                sync_directory(episode.path / "videos")
+                sync_directory(episode.path / "frames")
+                if self._fatal_error:
+                    raise CollectionFault(self._fatal_error)
+                episode.meta["status"] = "complete"
+            except Exception as exc:
+                episode.meta["status"] = "incomplete"
+                episode.meta["errors"].append(str(exc))
+        if episode.meta["status"] == "incomplete":
+            episode.meta["surviving_video_checks"] = {
+                role: inspect_surviving_video(episode.path / "videos" / f"{role}.mp4", writer.spec, runner)
+                for role, writer in episode.videos.items() if not writer.thread.is_alive()}
+            partial_files = {}
+            if not any(writer.thread.is_alive() for writer in writers):
+                try:
+                    for path in sorted(episode.path.rglob("*")):
+                        if path.is_file() and path.name != "meta.json":
+                            partial_files[str(path.relative_to(episode.path))] = {
+                                "bytes": path.stat().st_size, "sha256": file_sha256(path, runner)}
+                except Exception as exc:
+                    episode.meta["errors"].append(f"Partial file inventory: {exc}")
+            episode.meta["files"] = partial_files
+        atomic_json(episode.path / "meta.json", episode.meta)
+        with self._lock:
+            self._state = "review" if episode.meta["status"] == "complete" else "fault"
+            if episode.meta["errors"]: self._error = "; ".join(episode.meta["errors"])
+        self.publish_event({"event": "episode_finalized", "episode_id": episode.identifier,
+                            "status": episode.meta["status"], "received_at": self.clock()})
 
-    def _writer(self):
-        control = None
-        current = None
-        try:
-            self._image_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="collection-png")
-            control = (self.session_path / "control.jsonl").open("w", encoding="utf-8")
-            last_flush = self.clock()
-            while not self._stop.is_set() or not self.queue.empty() or self._pending_finish:
+    def _supervise(self):
+        while not self._stop.is_set() or not self._ops.empty():
+            try:
                 now = self.clock()
-                if now - self._space_checked_at >= 1:
-                    self._refresh_disk_space()
-                dequeued = True
-                try:
-                    event = self.queue.get(timeout=.05)
-                except queue.Empty:
+                with self._lock:
+                    episode = self._active
+                    if episode:
+                        if self._state == "postroll" and now >= episode.meta["capture_requested_end_time"]:
+                            self._finish_locked(episode.meta["end_reason"], False)
+                        else:
+                            for key in (*ROLES, "robot", "gripper"):
+                                value = self._latest.get(key)
+                                if value is None or now - value["received_at"] > self.source_timeout_s:
+                                    self._fault_locked(f"Source stopped: {key}")
+                                    break
+                if self._space_checked_at is None or now - self._space_checked_at >= .5:
+                    free = shutil.disk_usage(self.session_path).free
                     with self._lock:
-                        pending, self._pending_finish = self._pending_finish, None
-                    if pending is None:
-                        continue
-                    event, dequeued = ("finish", pending), False
-                try:
-                    kind = event[0]
-                    if kind == "control":
-                        self._line(control, event[1])
-                    elif kind == "begin":
-                        current = event[1]
-                        self._begin(current, event[2])
-                    elif kind == "raw":
-                        self._raw(event[1], event[2])
-                    elif kind == "observation":
-                        self._observation(event[1], event[2], event[3])
-                    elif kind == "finish":
-                        control.flush()
-                        self._finish(event[1])
-                        current = None
-                    elif kind == "disposition":
-                        event[1].meta["disposition"] = event[2]
-                        self._atomic_json(event[1].path / "meta.json", event[1].meta)
-                        with self._lock:
-                            self._state = "idle"
-                    now = self.clock()
-                    if now - last_flush >= 1:
-                        control.flush()
-                        if current:
-                            current.raw.flush()
-                            current.observations.flush()
-                        last_flush = now
-                finally:
-                    if dequeued:
-                        self.queue.task_done()
-        except Exception as exc:
-            with self._lock:
-                self._fatal_error = self._error = f"collection writer failed: {exc}"
-                if self._active:
-                    self._active.incomplete = True
-                    self._active.meta.update(end_time=self.clock(), end_reason=self._fatal_error)
-                    current = self._active
-                    self._active = None
-                self._state = "fault"
-            if current:
-                current.incomplete = True
-                current.meta.update(status="incomplete", end_reason=self._fatal_error)
-                try:
-                    self._finish(current)
-                except Exception:
-                    # Initial meta remains 'recording' if a full/unavailable disk
-                    # also prevents this update. Such an episode is not complete.
-                    pass
-        finally:
-            if self._image_pool:
-                self._image_pool.shutdown(wait=True, cancel_futures=True)
-            for handle in (control, current.raw if current else None, current.observations if current else None):
-                if handle and not handle.closed:
-                    try:
-                        handle.close()
-                    except Exception:
-                        pass
-            if self._fatal_error:
-                self._pending_finish = None
-                while True:
-                    try:
-                        self.queue.get_nowait()
-                        self.queue.task_done()
-                    except queue.Empty:
-                        break
+                        self._free_bytes, self._space_checked_at = free, now
+                        if free < self.min_free_bytes: self._fault_locked("Disk reserve breached")
+                try: kind, value = self._ops.get(timeout=.02)
+                except queue.Empty: continue
+                if kind == "begin": self._begin(value)
+                elif kind == "finish": self._finish(value)
+                elif kind == "disposition":
+                    episode, choice = value
+                    episode.meta["disposition"] = choice
+                    atomic_json(episode.path / "meta.json", episode.meta)
+                    with self._lock: self._state = "idle"
+            except Exception as exc:
+                with self._lock:
+                    self._fatal_error = self._error = f"Collection lifecycle: {exc}"
+                    if self._active: self._finish_locked(self._error, True)
+                    else: self._state = "fault"
 
     def close(self):
-        """Call after stopping motion; flushing cannot delay robot shutdown."""
         with self._lock:
-            if not self._opened or self._stop.is_set():
-                return
-            self._end_locked("session_closed", True)
+            if not self._opened or self._closed: return
+            self._closed = True
+            if self._active:
+                self._finish_locked("session_closed", True)
             self._stop.set()
-            self._wake.set()
-        if self.scheduler_thread:
-            self.scheduler_thread.join(2)
         if self.thread:
-            self.thread.join(30)
-            if self.thread.is_alive():
-                with self._lock:
-                    self._fatal_error = self._error = "collection writer did not finish within 30 seconds"
-                    self._state = "fault"
-        job = self._archive_job
-        if job and not job.finished.is_set():
-            if self._fatal_error: job.cancel()
-            job.thread.join(job.remaining + 4)
-            if job.thread.is_alive():
-                job.cancel()
-                job.thread.join(4)
-                with self._lock:
-                    self._fatal_error = self._error = 'video archive did not stop after its deadline'
-                    self._state = 'fault'
-
-
+            deadline = self._last.deadline if self._last and self._last.deadline else time.monotonic() + 30
+            self.thread.join(max(0., deadline - time.monotonic()) + 7)
+            if self.thread.is_alive(): self._fatal_error = "Collection lifecycle did not stop"
+        try:
+            self.clocks.close()
+        except Exception as exc:
+            self._session_fault(f"Final clock observation failed: {exc}")
+        self.session_writer.close()
+        self._session_meta.update(status="incomplete" if self._fatal_error else "closed",
+                                  closed_at=self.clock(), error=self._fatal_error,
+                                  files={name: {"sha256": file_sha256(self.session_path / name),
+                                                "bytes": (self.session_path / name).stat().st_size}
+                                         for name in ("control.jsonl", "events.jsonl", "clock_anchors.jsonl")
+                                         if (self.session_path / name).is_file()})
+        atomic_json(self.session_path / "session.json", self._session_meta)

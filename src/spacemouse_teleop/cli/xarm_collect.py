@@ -18,6 +18,7 @@ from spacemouse_teleop.backends.xarm6_camera.backend import XArmCameraBackend
 from spacemouse_teleop.backends.xarm6_camera.coordinator import CollectionCoordinator
 from spacemouse_teleop.backends.xarm6_camera.preview import Preview
 from spacemouse_teleop.backends.xarm6_camera.state import StatePoller
+from spacemouse_teleop.backends.xarm6_camera.report import TimestampedReportReceiver, MockReportReceiver
 from spacemouse_teleop.backends.xarm_sdk.input import LatestInput
 from spacemouse_teleop.backends.xarm_sdk.transport import SDKChannel, ReportReceiver
 from spacemouse_teleop.cli.xarm_teleop import run_loop
@@ -59,7 +60,8 @@ def provenance(mode):
             'source_sha256':{str(path.relative_to(repo)):hashlib.sha256(path.read_bytes()).hexdigest()
                              for path in sorted((repo/'src'/'spacemouse_teleop').rglob('*.py'))},
             'joints_order':['joint1','joint2','joint3','joint4','joint5','joint6'],
-            'tcp_frame':'base','tcp_rpy_convention':'R = Rz(yaw) Ry(pitch) Rx(roll)',
+            'tcp_frame':'base', 'native_tcp_orientation':'rotation_vector',
+            'auxiliary_rpy_convention':'R = Rz(yaw) Ry(pitch) Rx(roll)',
             'gripper_units':'SDK raw pulse; not calibrated opening or force'}
 
 def build_parser():
@@ -70,7 +72,7 @@ def build_parser():
     parser.add_argument('--output',help='Override collection output directory')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--dry-run',action='store_true',help='Synthetic cameras, robot and input; no hardware connections')
-    mode.add_argument('--observe-only',action='store_true',help='RGB + read-only robot queries; no HID, enabling, homing or motion')
+    mode.add_argument('--observe-only',action='store_true',help='RGB + passive TCP 30000 + read-only gripper; no HID, enabling, homing or motion')
     parser.add_argument('--headless',action='store_true',help='No GUI; only dry-run or observe-only')
     parser.add_argument('--auto-record',action='store_true',help='Automatically save one test episode; only dry-run or observe-only')
     parser.add_argument('--duration',type=float,default=0.,help='0 means unlimited; test modes can set a finite duration')
@@ -85,7 +87,7 @@ def main(argv=None):
         parser.error('--headless/--auto-record are test modes; live teleop uses explicit preview controls')
     if args.headless and (not args.auto_record or args.duration <= 0):
         parser.error('headless tests require --auto-record and a finite positive duration')
-    recorder = cameras = poller = source = backend = preview = reports = channel = None
+    recorder = cameras = poller = source = backend = preview = reports = channel = native = None
     coordinator = events = None
     result, reason = 0, 'completed'
     old_term = None
@@ -97,11 +99,14 @@ def main(argv=None):
         if not (args.dry_run or args.observe_only):
             config.require_live()
         mode = 'mock' if args.dry_run else ('read_only' if args.observe_only else 'teleop')
+        camera_specs = [{**c, 'serial': f'mock-{c["role"]}'} for c in data['cameras']] if args.dry_run else data['cameras']
         recorder = CollectionRecorder(args.output or data['output_root'],args.task,
-                    {'collection':data,'robot':asdict(robot)},sample_hz=data['sample_hz'],
-                    quality=data['quality'],min_free_bytes=data['min_free_bytes'],
-                    queue_size=data['queue_size'],metadata=provenance(mode),
-                    visual_storage=data['visual_storage'])
+                    {'collection':data,'robot':asdict(robot)}, cameras=camera_specs,
+                    pre_roll_s=data['pre_roll_s'],post_roll_s=data['post_roll_s'],
+                    source_timeout_s=data['source_timeout_s'],clock_interval_s=data['clock_interval_s'],
+                    min_free_bytes=data['min_free_bytes'],video_queue_size=data['queues']['video'],
+                    state_queue_size=data['queues']['states'],log_queue_size=data['queues']['session'],
+                    metadata=provenance(mode),visual_storage=data['visual_storage'])
         recorder.preflight()
         if not (args.dry_run or args.observe_only):
             backend = XArmCameraBackend(robot,recorder)
@@ -115,18 +120,23 @@ def main(argv=None):
             recorder.metadata.update(robot_identity=channel.identity(),initial_robot_feedback=initial.to_dict())
         recorder.open()
         print(f'Collection session: {recorder.session_path}',flush=True)
-        print(f'{mode}: target {data["sample_hz"]:g} observations/s; quality={data["quality"]}',flush=True)
+        print(f'{mode}: native RGB streams + TCP 30000 reports + independent gripper; no observation grid',flush=True)
         camera_type = MockCameraGroup if args.dry_run else CameraGroup
-        camera_specs = [{**c,'serial':f'mock-{c["role"]}'} for c in data['cameras']] if args.dry_run else data['cameras']
-        cameras = camera_type(camera_specs,recorder.publish_frame,
-                              lambda error:recorder.mark_fault(str(error)))
+        capture_specs = [{"frame_timeout_s": data["source_timeout_s"], **c} for c in camera_specs]
+        cameras = camera_type(capture_specs,recorder.publish_frame,
+                              lambda error:recorder.mark_fault(error), on_event=recorder.publish_event)
         cameras.start()
-        poller = StatePoller(robot.robot['ip'],recorder.publish_state,
-                    lambda error:recorder.mark_fault(str(error)),hz=data['robot_poll_hz'],
-                    timeout=robot.robot['socket_timeout_s'],
-                    channel_factory=MockReadOnlyChannel if args.dry_run else SDKChannel,
-                    gripper_hz=20. if args.dry_run or args.observe_only else 0.)
-        poller.start()
+        native_type = MockReportReceiver if args.dry_run else TimestampedReportReceiver
+        native = native_type(robot.robot['ip'], recorder.publish_state, recorder.mark_fault,
+                             on_event=recorder.publish_event, timeout=data['source_timeout_s'])
+        native.start()
+        if args.dry_run or args.observe_only:
+            poller = StatePoller(robot.robot['ip'], recorder.publish_state,
+                        lambda error: recorder.publish_event({'event':'gripper_query_error', **error}),
+                        hz=0., timeout=robot.robot['socket_timeout_s'],
+                        channel_factory=MockReadOnlyChannel if args.dry_run else SDKChannel,
+                        gripper_hz=20.)
+            poller.start()
         events = mp.get_context('spawn').Queue(maxsize=32)
         coordinator = CollectionCoordinator(recorder,events,auto_record=args.auto_record)
         if not args.headless:
@@ -136,11 +146,11 @@ def main(argv=None):
         old_term = signal.getsignal(signal.SIGTERM)
         signal.signal(signal.SIGTERM,lambda signum,frame: (_ for _ in ()).throw(KeyboardInterrupt()))
         deadline = time.monotonic()+10.
-        while len(cameras.latest_frames()) != 3:
+        while len(cameras.latest_frames()) != 3 or native.sequence == 0:
             coordinator.check_exit()
             errors = cameras.diagnostics()['errors']
-            if errors or time.monotonic() > deadline:
-                raise RuntimeError(f'Cameras not ready: {errors}')
+            if errors or native.error or time.monotonic() > deadline:
+                raise RuntimeError(f'Native sources not ready: {errors}; {native.error}')
             time.sleep(.02)
         if args.observe_only:
             # A read-only observer has no reset, stop, activate or write methods.
@@ -184,7 +194,11 @@ def main(argv=None):
                 print(f'Motion cleanup failed: {exc}',file=sys.stderr)
         if recorder:
             recorder.stop_episode(reason,incomplete=result != 0 or reason == 'interrupted')
-        for component in (source,poller,reports,channel,cameras,preview):
+            # Normal stop retains the configured tail while sources are still running.
+            tail_deadline = time.monotonic() + data['post_roll_s'] + 1.
+            while recorder.status()['state'] == 'postroll' and time.monotonic() < tail_deadline:
+                time.sleep(.01)
+        for component in (source,poller,native,reports,channel,cameras,preview):
             if component:
                 try:
                     component.close()
