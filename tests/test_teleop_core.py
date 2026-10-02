@@ -1,7 +1,7 @@
 import unittest
 
-from spacemouse_teleop.spacemouse.command import RawSpaceMouseState
-from spacemouse_teleop.spacemouse import TeleopConfig, TeleopCore
+from robot_teleop.inputs.spacemouse.command import RawSpaceMouseState
+from robot_teleop.inputs.spacemouse import TeleopConfig, TeleopCore
 
 
 class TeleopCoreTest(unittest.TestCase):

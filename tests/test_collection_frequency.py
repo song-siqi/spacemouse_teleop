@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from spacemouse_teleop.cli.xarm_frequency import (
+from robot_teleop.cli.xarm_frequency import (
     analyze_directory, build_result, camera_overlap, change_evidence,
     compare_control_logs, main, measurement_fingerprint, profile, query_pair_summary,
     summarize, summarize_control_log,
@@ -136,7 +136,7 @@ class CollectionFrequencyTest(unittest.TestCase):
             result=analyze_directory(root)
             self.assertFalse(result[0]['historical_tail_drain_verified'])
             self.assertEqual(result[0]['sources']['gripper']['value_changes'],0)
-            with patch('spacemouse_teleop.cli.xarm_frequency.ReportReceiver',side_effect=AssertionError('hardware accessed')):
+            with patch('robot_teleop.cli.xarm_frequency.ReportReceiver',side_effect=AssertionError('hardware accessed')):
                 with contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(main(['--analyze',str(root),'--output',str(Path(directory)/'new')]),0)
             self.assertEqual(before,{p.name:p.read_bytes() for p in root.iterdir()})
@@ -163,7 +163,7 @@ class CollectionFrequencyTest(unittest.TestCase):
             def close(self): self.publish(sample('tcp',1,clock.now+.001))
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'phase.jsonl'
-            with patch('spacemouse_teleop.cli.xarm_frequency.time',clock), patch('spacemouse_teleop.cli.xarm_frequency.ReportReceiver',Reports), patch('spacemouse_teleop.cli.xarm_frequency.StatePoller',Poller):
+            with patch('robot_teleop.cli.xarm_frequency.time',clock), patch('robot_teleop.cli.xarm_frequency.ReportReceiver',Reports), patch('robot_teleop.cli.xarm_frequency.StatePoller',Poller):
                 result=profile('unused',.05,.01,20.,0.,path)
             rows=[json.loads(line) for line in path.read_text().splitlines()]
             self.assertTrue(any(row.get('kind')=='tcp' for row in rows))
@@ -174,7 +174,7 @@ class CollectionFrequencyTest(unittest.TestCase):
     def test_failed_response_returns_nonzero_cli_and_short_duration_is_labelled(self):
         with tempfile.TemporaryDirectory() as directory:
             result=build_result([sample('joints',1,10.01,valid=False)],10.,10.1,20.,0.)
-            with patch('spacemouse_teleop.cli.xarm_frequency.profile',return_value=result):
+            with patch('robot_teleop.cli.xarm_frequency.profile',return_value=result):
                 output=io.StringIO()
                 with contextlib.redirect_stdout(output):
                     status=main(['--duration','.1','--rates','20','--output',str(Path(directory)/'output')])

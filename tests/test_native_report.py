@@ -3,7 +3,7 @@ import socket
 import struct
 import time
 import unittest
-from spacemouse_teleop.backends.xarm6_camera.report import (
+from robot_teleop.backends.real.xarm_sdk.report import (
     decode_report, PacketFramer, TimestampedReportReceiver, mock_packet, FIELD_LAYOUT)
 
 class NativeReportTests(unittest.TestCase):
@@ -129,7 +129,7 @@ class NativeReportTests(unittest.TestCase):
 
     def test_804_layout_offsets_agree_with_installed_sdk_structure(self):
         try:
-            from spacemouse_teleop.backends.xarm_sdk.transport import sdk_types
+            from robot_teleop.backends.real.xarm_sdk.transport import sdk_types
             _, report_type = sdk_types()
         except RuntimeError:
             self.skipTest("SDK codec not installed")

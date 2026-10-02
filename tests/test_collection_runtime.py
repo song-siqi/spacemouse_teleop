@@ -7,9 +7,9 @@ import types
 import unittest
 from unittest.mock import patch
 
-from spacemouse_teleop.backends.xarm6_camera.backend import XArmCameraBackend
-from spacemouse_teleop.backends.xarm6_camera.coordinator import CollectionCoordinator
-from spacemouse_teleop.cli.xarm_teleop import run_loop
+from robot_teleop.backends.real.xarm_sdk.observed import ObservedXArmBackend
+from robot_teleop.runtime.collection.coordinator import CollectionCoordinator
+from robot_teleop.cli.xarm_teleop import run_loop
 from test_input_safety import raw
 from test_xarm_config_safety import feedback, live_config
 
@@ -57,7 +57,7 @@ class MotionHarness:
         self.events, self.instances = [], []
         self.clock = FakeClock()
         self.threaded = threaded
-        self.wrapper = XArmCameraBackend(live_config(), self.sink,
+        self.wrapper = ObservedXArmBackend(live_config(), self.sink,
                                          backend_factory=self.make_backend,
                                          channel_factory=self.make_channel)
 
@@ -193,7 +193,7 @@ class CoordinatorTests(unittest.TestCase):
         self.events = queue.Queue()
         self.coordinator = CollectionCoordinator(self.sink, self.events)
         self.clock = FakeClock()
-        clock_patch = patch('spacemouse_teleop.backends.xarm6_camera.coordinator.time', self.clock)
+        clock_patch = patch('robot_teleop.runtime.collection.coordinator.time', self.clock)
         clock_patch.start()
         self.addCleanup(clock_patch.stop)
 
@@ -281,8 +281,8 @@ class CollectionRunLoopTests(unittest.TestCase):
         self.addCleanup(harness.close)
         events = queue.Queue()
         coordinator = CollectionCoordinator(harness.sink, events)
-        clock_patch = patch('spacemouse_teleop.cli.xarm_teleop.time', harness.clock)
-        coordinator_patch = patch('spacemouse_teleop.backends.xarm6_camera.coordinator.time', harness.clock)
+        clock_patch = patch('robot_teleop.cli.xarm_teleop.time', harness.clock)
+        coordinator_patch = patch('robot_teleop.runtime.collection.coordinator.time', harness.clock)
         clock_patch.start()
         coordinator_patch.start()
         self.addCleanup(clock_patch.stop)

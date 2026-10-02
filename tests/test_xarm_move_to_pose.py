@@ -10,7 +10,7 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 
-from spacemouse_teleop.cli import xarm_move_to_pose as move
+from robot_teleop.cli import xarm_move_to_pose as move
 
 
 POSE = [250., 0., 300., 180., 0., 0.]

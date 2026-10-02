@@ -1,7 +1,7 @@
 import types
 import unittest
-from spacemouse_teleop.recording.clocks import ClockSampler
-from spacemouse_teleop.sensors.realsense.capture import read_frame_metadata, capture_identity
+from robot_teleop.recording.clocks import ClockSampler
+from robot_teleop.sensors.realsense.capture import read_frame_metadata, capture_identity
 
 class ClockEvidenceTests(unittest.TestCase):
     def test_brackets_are_preserved_and_wall_step_is_not_corrected(self):

@@ -1,0 +1,14 @@
+{
+  "schema_version": 3,
+  "robot_config": "spacemouse_xarm6_demo.json",
+  "output_root": "../data/collections",
+  "robot_state_source": "tcp30000",
+  "cameras": [],
+  "min_free_bytes": 1073741824,
+  "pre_roll_s": 0.5,
+  "post_roll_s": 0.5,
+  "source_timeout_s": 1.0,
+  "clock_interval_s": 1.0,
+  "queues": {"video": 64, "states": 4096, "session": 4096},
+  "visual_storage": {"mode": "native_video", "crf": 18, "preset": "veryfast", "threads_per_camera": 2, "gop": 30}
+}

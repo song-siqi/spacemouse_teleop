@@ -7,11 +7,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from spacemouse_teleop.backends.xarm_sdk.backend import XArmBackend
-from spacemouse_teleop.backends.xarm_sdk.config import XArmConfig, DEFAULT_CONFIG
-from spacemouse_teleop.backends.xarm_sdk.homing import JointHomer
-from spacemouse_teleop.backends.xarm_sdk.safety import TeleopFault, check_homing_site
-from spacemouse_teleop.cli.xarm_teleop import run_loop
+from robot_teleop.backends.real.xarm_sdk.backend import XArmBackend
+from robot_teleop.backends.real.xarm_sdk.config import XArmConfig, DEFAULT_CONFIG
+from robot_teleop.backends.real.xarm_sdk.homing import JointHomer
+from robot_teleop.backends.real.xarm_sdk.safety import TeleopFault, check_homing_site
+from robot_teleop.cli.xarm_teleop import run_loop
 from test_xarm_config_safety import feedback, live_config
 from test_input_safety import raw
 
@@ -79,7 +79,7 @@ class HomingTest(unittest.TestCase):
 
     def test_home_reaches_target_settles_stops_then_allows_teleop(self):
         config, world, backend, recorder, rows = self.rig()
-        with patch('spacemouse_teleop.backends.xarm_sdk.backend.time', world):
+        with patch('robot_teleop.backends.real.xarm_sdk.backend.time', world):
             backend.home(recorder, lambda: None)
             self.assertFalse(backend.armed)
             self.assertEqual(world.state, 4)
@@ -98,7 +98,7 @@ class HomingTest(unittest.TestCase):
         config, world, backend, recorder, rows = self.rig(report_period=.205)
         world.joints = [3.2, 0., 0., 0., 0., 0.]
         started = world.now
-        with patch('spacemouse_teleop.backends.xarm_sdk.backend.time', world):
+        with patch('robot_teleop.backends.real.xarm_sdk.backend.time', world):
             backend.home(recorder, lambda: None)
         self.assertGreater(world.now - started, 30.)
         self.assertLess(world.now - started, config.robot['homing']['timeout_s'])
@@ -110,7 +110,7 @@ class HomingTest(unittest.TestCase):
 
     def test_waiting_for_report_still_stops_on_real_feedback_timeout(self):
         config, world, backend, recorder, rows = self.rig(report_period=.205, stop_reports_after=.5)
-        with patch('spacemouse_teleop.backends.xarm_sdk.backend.time', world):
+        with patch('robot_teleop.backends.real.xarm_sdk.backend.time', world):
             with self.assertRaisesRegex(TeleopFault, 'feedback missing or stale'):
                 backend.home(recorder, lambda: None)
         self.assertTrue(any(r['event'] == 'homing_waiting_feedback' for r in rows))
@@ -121,7 +121,7 @@ class HomingTest(unittest.TestCase):
     def test_homing_timeout_stops_without_entering_teleop(self):
         config, world, backend, recorder, rows = self.rig(stuck=True)
         config.robot['homing']['timeout_s'] = .4
-        with patch('spacemouse_teleop.backends.xarm_sdk.backend.time', world):
+        with patch('robot_teleop.backends.real.xarm_sdk.backend.time', world):
             with self.assertRaisesRegex(TeleopFault, 'timed out'):
                 backend.home(recorder, lambda: None)
         self.assertEqual(world.calls[-1], 'stop')
@@ -134,7 +134,7 @@ class HomingTest(unittest.TestCase):
             def guard():
                 if world.now > 10.04:
                     raise error
-            with patch('spacemouse_teleop.backends.xarm_sdk.backend.time', world):
+            with patch('robot_teleop.backends.real.xarm_sdk.backend.time', world):
                 with self.assertRaises(type(error)):
                     backend.home(recorder, guard)
             self.assertEqual(world.calls[-1], 'stop')
@@ -145,7 +145,7 @@ class HomingTest(unittest.TestCase):
         def guard():
             if world.now > 10.04:
                 world.stale = True
-        with patch('spacemouse_teleop.backends.xarm_sdk.backend.time', world):
+        with patch('robot_teleop.backends.real.xarm_sdk.backend.time', world):
             with self.assertRaisesRegex(TeleopFault, 'stale'):
                 backend.home(recorder, guard)
         self.assertEqual(world.calls[-1], 'stop')

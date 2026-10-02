@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "robot": {"name": "xarm6"},
+  "end_effector": {"name": "xarm_gripper"},
+  "backend": {"name": "mujoco", "control_hz": 60},
+  "setup": {"name": "tabletop", "mount": "official_model"},
+  "input": {"name": "scripted", "segments": [{"duration": 2, "linear": [0, 0, 0.02]}]},
+  "recording": {"cameras": [], "format_version": 4}
+}

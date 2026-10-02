@@ -4,12 +4,12 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
-from spacemouse_teleop.spacemouse import TeleopConfig, TeleopCore
-from spacemouse_teleop.spacemouse.command import RawSpaceMouseState
-from spacemouse_teleop.spacemouse.readers import PySpaceMouseReader, _HIDReportMonitor
-from spacemouse_teleop.backends.xarm_sdk.config import XArmConfig
-from spacemouse_teleop.backends.xarm_sdk.input import LatestInput, input_deadline
-from spacemouse_teleop.backends.xarm_sdk.safety import TeleopFault
+from robot_teleop.inputs.spacemouse import TeleopConfig, TeleopCore
+from robot_teleop.inputs.spacemouse.command import RawSpaceMouseState
+from robot_teleop.inputs.spacemouse.readers import PySpaceMouseReader, _HIDReportMonitor
+from robot_teleop.backends.real.xarm_sdk.config import XArmConfig
+from robot_teleop.inputs.spacemouse.polling import LatestInput, input_deadline
+from robot_teleop.backends.real.xarm_sdk.safety import TeleopFault
 
 
 def raw(t, x=0., buttons=(0, 0)):
@@ -72,7 +72,7 @@ class InputSafetyTest(unittest.TestCase):
         state = types.SimpleNamespace(x=1, y=0, z=0, roll=0, pitch=0, yaw=0, buttons=(0, 0), t=10.)
         reader = PySpaceMouseReader()
         reader._pyspacemouse = types.SimpleNamespace(read=lambda: state)
-        with patch('spacemouse_teleop.spacemouse.readers.time.monotonic', side_effect=[10., 11., 12.]):
+        with patch('robot_teleop.inputs.spacemouse.readers.time.monotonic', side_effect=[10., 11., 12.]):
             a, b = reader.read(), reader.read()
             state.t = 12.
             c = reader.read()
@@ -87,7 +87,7 @@ class InputSafetyTest(unittest.TestCase):
         mappings = {name: types.SimpleNamespace(channel=1 if i < 3 else 2) for i, name in enumerate(('x', 'y', 'z', 'roll', 'pitch', 'yaw'))}
         timestamps = [None] * 6
         monitor = _HIDReportMonitor(device, mappings, timestamps)
-        with patch('spacemouse_teleop.spacemouse.readers.time.monotonic', side_effect=[1., 2., 3., 4.]):
+        with patch('robot_teleop.inputs.spacemouse.readers.time.monotonic', side_effect=[1., 2., 3., 4.]):
             monitor.read()
             monitor.read()
             self.assertEqual(timestamps, [1., 1., 1., None, None, None])

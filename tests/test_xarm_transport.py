@@ -5,8 +5,8 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from spacemouse_teleop.backends.xarm_sdk.transport import PacketSocket, SDKChannel
-from spacemouse_teleop.backends.xarm_sdk.safety import TeleopFault
+from robot_teleop.backends.real.xarm_sdk.transport import PacketSocket, SDKChannel
+from robot_teleop.backends.real.xarm_sdk.safety import TeleopFault
 
 
 class PacketSocketTest(unittest.TestCase):

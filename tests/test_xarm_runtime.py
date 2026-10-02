@@ -7,10 +7,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from spacemouse_teleop.backends.xarm_sdk.backend import GripperWorker, XArmBackend
-from spacemouse_teleop.backends.xarm_sdk.safety import TeleopFault
-from spacemouse_teleop.cli.xarm_teleop import main, run_loop, process_input
-from spacemouse_teleop.recording.async_jsonl import AsyncJsonlRecorder
+from robot_teleop.backends.real.xarm_sdk.backend import GripperWorker, XArmBackend
+from robot_teleop.backends.real.xarm_sdk.safety import TeleopFault
+from robot_teleop.cli.xarm_teleop import main, run_loop, process_input
+from robot_teleop.recording.async_jsonl import AsyncJsonlRecorder
 from test_xarm_config_safety import feedback, live_config
 from test_input_safety import raw
 
@@ -284,7 +284,7 @@ class BackendTest(unittest.TestCase):
 
 class CliTest(unittest.TestCase):
     def test_missing_site_settings_fail_before_hid_or_network(self):
-        with patch('spacemouse_teleop.cli.xarm_teleop.LatestInput') as input_factory, patch('socket.create_connection') as connect:
+        with patch('robot_teleop.cli.xarm_teleop.LatestInput') as input_factory, patch('socket.create_connection') as connect:
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(main(['--duration', '.1']), 1)
             input_factory.assert_not_called()
@@ -338,7 +338,7 @@ class CliTest(unittest.TestCase):
                 def start(self): pass
                 def close(self): calls.append('input_close')
             with tempfile.TemporaryDirectory() as directory:
-                with patch('spacemouse_teleop.cli.xarm_teleop.XArmConfig.load', return_value=config), patch('spacemouse_teleop.cli.xarm_teleop.XArmBackend', Backend), patch('spacemouse_teleop.cli.xarm_teleop.LatestInput', Input), patch('spacemouse_teleop.cli.xarm_teleop.run_loop', side_effect=failure):
+                with patch('robot_teleop.cli.xarm_teleop.XArmConfig.load', return_value=config), patch('robot_teleop.cli.xarm_teleop.XArmBackend', Backend), patch('robot_teleop.cli.xarm_teleop.LatestInput', Input), patch('robot_teleop.cli.xarm_teleop.run_loop', side_effect=failure):
                     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                         main(['--log', str(Path(directory) / 'log.jsonl')])
             self.assertEqual(calls, ['robot_stop', 'input_close'])
@@ -364,7 +364,7 @@ class GripperFreshnessTest(unittest.TestCase):
 
 class NeutralResumeTest(unittest.TestCase):
     def test_reverse_after_neutral_cannot_revive_previous_velocity(self):
-        from spacemouse_teleop.spacemouse import TeleopCore
+        from robot_teleop.inputs.spacemouse import TeleopCore
         config = live_config()
         core = TeleopCore(config.teleop)
         self.assertGreater(process_input(core, raw(1., 1.), 'hold', config).linear_vel_mps[0], 0)

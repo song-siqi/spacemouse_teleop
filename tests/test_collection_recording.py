@@ -11,12 +11,12 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
-from spacemouse_teleop.recording.collection import CollectionRecorder, ROLES
-from spacemouse_teleop.recording.raw import check_episode, iter_source
-from spacemouse_teleop.recording.native_writer import StreamingVideo
-from spacemouse_teleop.backends.xarm6_camera.report import MockReportReceiver
-from spacemouse_teleop.backends.xarm6_camera.state import StatePoller
-from spacemouse_teleop.sensors.realsense import MockCameraGroup
+from robot_teleop.recording.legacy_xarm import CollectionRecorder, ROLES
+from robot_teleop.recording.raw import check_episode, iter_source
+from robot_teleop.recording.native_writer import StreamingVideo
+from robot_teleop.backends.real.xarm_sdk.report import MockReportReceiver
+from robot_teleop.backends.real.xarm_sdk.state import StatePoller
+from robot_teleop.sensors.realsense import MockCameraGroup
 
 def wait_until(check, timeout=10):
     deadline = time.monotonic() + timeout
@@ -196,7 +196,7 @@ class NativeRecordingTests(unittest.TestCase):
     def test_start_and_stop_do_not_touch_filesystem_on_calling_thread(self):
         h=self.harness()
         owner=threading.get_ident()
-        import spacemouse_teleop.recording.collection as collection
+        import robot_teleop.recording.legacy_xarm as collection
         original=collection.atomic_json
         def checked(*args,**kwargs):
             self.assertNotEqual(threading.get_ident(),owner)
@@ -207,7 +207,7 @@ class NativeRecordingTests(unittest.TestCase):
 
     def test_slow_validation_keeps_control_log_live(self):
         h=self.harness()
-        from spacemouse_teleop.recording import raw
+        from robot_teleop.recording import raw
         entered,release=threading.Event(),threading.Event()
         original=raw.validate_native_episode
         def slow(*a,**kw):
@@ -272,7 +272,7 @@ class NativeRecordingTests(unittest.TestCase):
         h=self.harness()
         h.rec.min_free_bytes=1
         h.start()
-        with patch("spacemouse_teleop.recording.collection.shutil.disk_usage",
+        with patch("robot_teleop.recording.legacy_xarm.shutil.disk_usage",
                    return_value=types.SimpleNamespace(free=0)):
             wait_until(lambda:h.rec.status()["state"]=="fault")
         path=Path(h.rec.status()["path"])
@@ -280,7 +280,7 @@ class NativeRecordingTests(unittest.TestCase):
 
     def test_state_disk_full_preserves_partial_files_as_incomplete(self):
         h=self.harness()
-        from spacemouse_teleop.recording import native_writer
+        from robot_teleop.recording import native_writer
         original=native_writer.line
         def full(handle,row):
             if row.get("kind") == "robot":

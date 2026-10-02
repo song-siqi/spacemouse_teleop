@@ -11,8 +11,8 @@ import unittest
 import zlib
 from pathlib import Path
 
-from spacemouse_teleop.cli.collection_check import main as check_main
-from spacemouse_teleop.recording.raw import check_episode
+from robot_teleop.cli.collection_check import main as check_main
+from robot_teleop.recording.raw import check_episode
 
 
 def png(color):

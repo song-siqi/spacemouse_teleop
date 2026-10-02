@@ -8,7 +8,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from spacemouse_teleop.cli.mujoco_diagnose import main
+from robot_teleop.cli.mujoco_diagnose import main
 
 
 if __name__ == "__main__":

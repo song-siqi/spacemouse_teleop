@@ -1,8 +1,8 @@
 import time
 import unittest
 
-from spacemouse_teleop.backends.xarm6_camera.state import StatePoller, ObservedChannel
-from spacemouse_teleop.cli.xarm_frequency import summarize
+from robot_teleop.backends.real.xarm_sdk.state import StatePoller, ObservedChannel
+from robot_teleop.cli.xarm_frequency import summarize
 
 
 class Channel:

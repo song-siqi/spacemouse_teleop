@@ -4,7 +4,7 @@ import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from spacemouse_teleop.backends.mujoco import (
+from robot_teleop.backends.sim.mujoco import (
     CAMERA_NAMES,
     CUBE_FRICTION,
     FINGER_PAD_FRICTION,
@@ -33,11 +33,11 @@ from spacemouse_teleop.backends.mujoco import (
     XArm6TableCubeEnv,
     ensure_official_xarm6_table_cube_mjcf,
 )
-from spacemouse_teleop.backends.mujoco.contact_diagnostics import (
+from robot_teleop.backends.sim.mujoco.contact_diagnostics import (
     capture_contact_snapshot,
     summarize_contact_snapshots,
 )
-from spacemouse_teleop.spacemouse.command import TeleopCommand
+from robot_teleop.inputs.spacemouse.command import TeleopCommand
 
 
 class MujocoAssetTest(unittest.TestCase):
@@ -45,7 +45,7 @@ class MujocoAssetTest(unittest.TestCase):
         tree = ET.parse(ensure_official_xarm6_table_cube_mjcf())
         root = tree.getroot()
         model_version = root.find(
-            ".//custom/numeric[@name='spacemouse_teleop_model_version']"
+            ".//custom/numeric[@name='robot_teleop_model_version']"
         )
 
         joint_names = {joint.attrib["name"] for joint in root.findall(".//joint")}

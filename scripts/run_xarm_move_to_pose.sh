@@ -7,4 +7,4 @@ if [[ ! -x "$MOVE_POSE_REPO_DIR/.venv/bin/python" ]]; then
   exit 1
 fi
 export PYTHONPATH="$MOVE_POSE_REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
-exec "$MOVE_POSE_REPO_DIR/.venv/bin/python" -u -m spacemouse_teleop.cli.xarm_move_to_pose "$@"
+exec "$MOVE_POSE_REPO_DIR/.venv/bin/python" -u -m robot_teleop.cli.xarm_move_to_pose "$@"

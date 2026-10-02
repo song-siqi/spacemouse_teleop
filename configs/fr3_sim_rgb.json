@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "robot": {"name": "fr3"},
+  "end_effector": {"name": "robotiq_2f85"},
+  "backend": {"name": "mujoco", "control_hz": 30},
+  "setup": {"name": "tabletop", "mount": "idealized_identity_not_calibrated"},
+  "input": {"name": "scripted", "segments": [{"duration": 2, "linear": [0, 0, 0.02]}]},
+  "recording": {"format_version": 4, "cameras": [
+    {"id": "overview", "camera": "overview", "width": 320, "height": 240, "fps": 60},
+    {"id": "side", "camera": "side", "width": 320, "height": 240, "fps": 20},
+    {"id": "detail", "camera": "overview", "width": 320, "height": 240, "fps": 15}
+  ]}
+}

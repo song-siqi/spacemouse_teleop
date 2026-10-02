@@ -4,7 +4,7 @@ import time
 import types
 import unittest
 
-from spacemouse_teleop.sensors.realsense import CameraGroup, MockCameraGroup, REQUIRED_ROLES, enumerate_devices
+from robot_teleop.sensors.realsense import CameraGroup, MockCameraGroup, REQUIRED_ROLES, enumerate_devices
 
 
 class Array:

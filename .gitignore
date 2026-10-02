@@ -12,6 +12,8 @@ __pycache__/
 # Runtime logs, experiments, recordings and exported datasets (not backups)
 /logs/*
 /data/
+/recordings/
+/MUJOCO_LOG.TXT
 
 # Optional complete machine-local configs; select explicitly with --config
 /configs/*.local.json

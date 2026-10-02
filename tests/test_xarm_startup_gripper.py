@@ -5,8 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import test_xarm_homing as homing_tests
-from spacemouse_teleop.backends.xarm_sdk.config import DEFAULT_CONFIG, XArmConfig
-from spacemouse_teleop.backends.xarm_sdk.safety import TeleopFault
+from robot_teleop.backends.real.xarm_sdk.config import DEFAULT_CONFIG, XArmConfig
+from robot_teleop.backends.real.xarm_sdk.safety import TeleopFault
 
 
 class StartupGripperTest(unittest.TestCase):
@@ -75,7 +75,7 @@ class StartupGripperTest(unittest.TestCase):
 
     def test_open_confirmed_before_any_arm_motion_with_device_endpoint_tolerance(self):
         config, world, backend, recorder, rows, gripper = self.rig()
-        with patch('spacemouse_teleop.backends.xarm_sdk.backend.time', world):
+        with patch('robot_teleop.backends.real.xarm_sdk.backend.time', world):
             backend.home(recorder, lambda: None)
         events = [r['event'] for r in rows]
         self.assertLess(events.index('startup_gripper_open_completed'), events.index('homing_started'))
@@ -92,7 +92,7 @@ class StartupGripperTest(unittest.TestCase):
         config, world, backend, recorder, rows, gripper = self.rig()
         config.gripper['startup_open']['timeout_s'] = .4
         gripper.blocked, gripper.state_override = True, 'stopped'
-        with patch('spacemouse_teleop.backends.xarm_sdk.backend.time', world):
+        with patch('robot_teleop.backends.real.xarm_sdk.backend.time', world):
             with self.assertRaisesRegex(TeleopFault, 'opening timed out'):
                 backend.home(recorder, lambda: None)
         self.assert_no_arm_motion(world, backend)
@@ -107,7 +107,7 @@ class StartupGripperTest(unittest.TestCase):
                 config.gripper['startup_open']['timeout_s'] = .4
                 gripper.position = 838
                 gripper.state_override, gripper.target_override = state, target
-                with patch('spacemouse_teleop.backends.xarm_sdk.backend.time', world):
+                with patch('robot_teleop.backends.real.xarm_sdk.backend.time', world):
                     with self.assertRaisesRegex(TeleopFault, 'opening timed out'):
                         backend.home(recorder, lambda: None)
                 self.assert_no_arm_motion(world, backend)
@@ -116,7 +116,7 @@ class StartupGripperTest(unittest.TestCase):
     def test_initialization_failure_does_not_send_open_or_arm_motion(self):
         config, world, backend, recorder, rows, gripper = self.rig()
         gripper.init_error = True
-        with patch('spacemouse_teleop.backends.xarm_sdk.backend.time', world):
+        with patch('robot_teleop.backends.real.xarm_sdk.backend.time', world):
             with self.assertRaisesRegex(TeleopFault, 'initialization failed'):
                 backend.home(recorder, lambda: None)
         self.assertEqual(gripper.targets, [])
@@ -129,7 +129,7 @@ class StartupGripperTest(unittest.TestCase):
             def guard():
                 if world.now > 10.1:
                     raise error
-            with patch('spacemouse_teleop.backends.xarm_sdk.backend.time', world):
+            with patch('robot_teleop.backends.real.xarm_sdk.backend.time', world):
                 with self.assertRaises(type(error)):
                     backend.home(recorder, guard)
             self.assertEqual(len(gripper.targets), 2)
@@ -142,7 +142,7 @@ class StartupGripperTest(unittest.TestCase):
         def guard():
             if 'gripper_init' in world.calls:
                 raise TeleopFault('input disappeared during initialization')
-        with patch('spacemouse_teleop.backends.xarm_sdk.backend.time', world):
+        with patch('robot_teleop.backends.real.xarm_sdk.backend.time', world):
             with self.assertRaisesRegex(TeleopFault, 'input disappeared'):
                 backend.home(recorder, guard)
         self.assertEqual(gripper.targets, [])
@@ -154,7 +154,7 @@ class StartupGripperTest(unittest.TestCase):
         def guard():
             if world.now > 10.1:
                 world.stale = True
-        with patch('spacemouse_teleop.backends.xarm_sdk.backend.time', world):
+        with patch('robot_teleop.backends.real.xarm_sdk.backend.time', world):
             with self.assertRaisesRegex(TeleopFault, 'feedback missing or stale'):
                 backend.home(recorder, guard)
         self.assert_no_arm_motion(world, backend)
@@ -163,7 +163,7 @@ class StartupGripperTest(unittest.TestCase):
     def test_opening_error_and_failed_cleanup_are_reported(self):
         config, world, backend, recorder, rows, gripper = self.rig()
         gripper.error_code, gripper.hold_error = 7, True
-        with patch('spacemouse_teleop.backends.xarm_sdk.backend.time', world):
+        with patch('robot_teleop.backends.real.xarm_sdk.backend.time', world):
             with self.assertRaisesRegex(TeleopFault, 'Startup gripper error: 7; hold failed'):
                 backend.home(recorder, lambda: None)
         self.assertEqual(rows[-1]['hold_error'], 'lost hold reply')
@@ -175,7 +175,7 @@ class StartupGripperTest(unittest.TestCase):
         world.joints = [0.] * 6
         config.robot['homing']['timeout_s'] = .6
         gripper.speed = 300.
-        with patch('spacemouse_teleop.backends.xarm_sdk.backend.time', world):
+        with patch('robot_teleop.backends.real.xarm_sdk.backend.time', world):
             backend.home(recorder, lambda: None)
         opened = next(r['timestamp'] for r in rows if r['event'] == 'startup_gripper_open_completed')
         home_started = next(r['timestamp'] for r in rows if r['event'] == 'homing_started')

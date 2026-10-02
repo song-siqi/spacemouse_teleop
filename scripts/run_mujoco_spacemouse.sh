@@ -35,7 +35,7 @@ elif [[ "$WANT_VIEWER" != "0" ]] && command -v mjpython >/dev/null 2>&1; then
   PYTHON="$(command -v mjpython)"
 elif [[ "$WANT_VIEWER" != "0" && "$(uname -s)" == "Darwin" ]]; then
   echo "MuJoCo viewer on macOS must be launched with mjpython." >&2
-  echo "Install the sim extras in the venv, then retry: UV_CACHE_DIR=.uv-cache uv pip install -e '.[sim,hardware]'" >&2
+  echo "Install the sim extras in the venv, then retry: UV_CACHE_DIR=.uv-cache uv pip install -e '.[sim,spacemouse]'" >&2
   exit 1
 elif [[ -x ".venv/bin/python" ]]; then
   PYTHON=".venv/bin/python"

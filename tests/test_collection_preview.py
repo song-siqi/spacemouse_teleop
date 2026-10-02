@@ -1,8 +1,8 @@
 import queue
 import threading
 import unittest
-from spacemouse_teleop.backends.xarm6_camera.preview import Preview
-from spacemouse_teleop.backends.xarm6_camera.coordinator import CollectionCoordinator
+from robot_teleop.runtime.collection.preview import Preview
+from robot_teleop.runtime.collection.coordinator import CollectionCoordinator
 
 class Process:
     def __init__(self, code): self.exitcode=code

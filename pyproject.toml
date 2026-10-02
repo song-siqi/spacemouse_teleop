@@ -1,55 +1,37 @@
 [project]
-name = "spacemouse-teleop"
+name = "robot-teleop"
 version = "0.1.0"
-description = "SpaceMouse teleoperation front-end for xArm6 real robot and MuJoCo simulation backends."
+description = "Multi-robot teleoperation and source-native recording for real and simulated robots."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-hardware = [
+spacemouse = [
     "hidapi>=0.15.0",
     "pyspacemouse==2.1.0",
 ]
 xarm = ["xarm-python-sdk==1.18.4"]
-collection = [
+realsense = [
     "pyrealsense2==2.58.4.10922",
-    "numpy==2.5.3",
-    "opencv-python==5.0.0.93",
 ]
+recording = ["opencv-python==4.11.0.86"]
 sim = [
-    "mujoco>=3.2.0",
+    "mujoco==3.12.0",
     "numpy>=1.24.0",
     "robot_descriptions>=3.1.0",
     "xacrodoc>=2.0.1",
 ]
 
 [project.scripts]
-spacemouse-collection-finalize = "spacemouse_teleop.cli.collection_finalize:main"
-spacemouse-xarm-frequency = "spacemouse_teleop.cli.xarm_frequency:main"
-spacemouse-realsense-diagnose = "spacemouse_teleop.cli.realsense_diagnose:main"
-spacemouse-xarm-collect = "spacemouse_teleop.cli.xarm_collect:main"
-spacemouse-collection-check = "spacemouse_teleop.cli.collection_check:main"
-spacemouse-xarm-diagnose = "spacemouse_teleop.cli.xarm_diagnose:main"
-spacemouse-xarm-teleop = "spacemouse_teleop.cli.xarm_teleop:main"
-spacemouse-diagnose = "spacemouse_teleop.cli.diagnose:main"
-spacemouse-probe = "spacemouse_teleop.cli.probe:main"
-spacemouse-debug = "spacemouse_teleop.cli.debug:main"
-spacemouse-mujoco-diagnose = "spacemouse_teleop.cli.mujoco_diagnose:main"
-spacemouse-mujoco-contact-diagnostics = "spacemouse_teleop.cli.mujoco_contact_diagnostics:main"
-spacemouse-mujoco-gripper-contact-probe = "spacemouse_teleop.cli.mujoco_gripper_contact_probe:main"
-spacemouse-mujoco-gripper-lift-probe = "spacemouse_teleop.cli.mujoco_gripper_lift_probe:main"
-spacemouse-mujoco-gripper-press-probe = "spacemouse_teleop.cli.mujoco_gripper_press_probe:main"
-spacemouse-mujoco-gripper-top-press-probe = "spacemouse_teleop.cli.mujoco_gripper_top_press_probe:main"
-spacemouse-mujoco-response-probe = "spacemouse_teleop.cli.mujoco_response_probe:main"
-spacemouse-mujoco-teleop = "spacemouse_teleop.cli.mujoco_teleop:main"
+robot-teleop = "robot_teleop.cli.main:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/spacemouse_teleop"]
+packages = ["src/robot_teleop"]
 
 [tool.uv]
 package = true

@@ -4,7 +4,7 @@ import unittest
 from enum import Enum
 from unittest.mock import patch
 
-from spacemouse_teleop.spacemouse.readers import PySpaceMouseReader
+from robot_teleop.inputs.spacemouse.readers import PySpaceMouseReader
 
 
 class ReaderTest(unittest.TestCase):
@@ -51,7 +51,7 @@ class ReaderTest(unittest.TestCase):
                 axis_convention="ros",
             )
             with patch(
-                "spacemouse_teleop.spacemouse.readers._preload_hidapi_on_macos"
+                "robot_teleop.inputs.spacemouse.readers._preload_hidapi_on_macos"
             ):
                 reader.open()
             state = reader.read()

@@ -6,7 +6,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from spacemouse_teleop.cli.diagnose import main  # noqa: E402
+from robot_teleop.cli.diagnose import main  # noqa: E402
 
 
 if __name__ == "__main__":

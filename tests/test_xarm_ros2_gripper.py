@@ -1,6 +1,6 @@
 import unittest
 
-from spacemouse_teleop.backends.xarm_ros2 import XArmGripperMapping
+from robot_teleop.backends.real.xarm_ros2 import XArmGripperMapping
 
 
 class XArmRos2GripperTest(unittest.TestCase):

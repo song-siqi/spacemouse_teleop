@@ -2,8 +2,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from spacemouse_teleop.backends.xarm6_camera.config import CollectionConfig, DEFAULT_CONFIG
-from spacemouse_teleop.backends.xarm_sdk.config import XArmConfig
+from robot_teleop.backends.real.xarm_sdk.collection_config import CollectionConfig, DEFAULT_CONFIG
+from robot_teleop.backends.real.xarm_sdk.config import XArmConfig
 
 class CollectionConfigTests(unittest.TestCase):
     def setUp(self):

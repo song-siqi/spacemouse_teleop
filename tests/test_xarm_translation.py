@@ -9,13 +9,13 @@ import time
 import unittest
 from unittest.mock import patch
 
-from spacemouse_teleop.backends.xarm_sdk.backend import XArmBackend
-from spacemouse_teleop.backends.xarm_sdk.input import LatestInput, input_deadline, is_neutral
-from spacemouse_teleop.backends.xarm_sdk.safety import RobotFeedback, TeleopFault, VelocityLimiter
-from spacemouse_teleop.cli import xarm_translation as translation
-from spacemouse_teleop.cli.xarm_teleop import process_input, run_loop
-from spacemouse_teleop.spacemouse import TeleopCore
-from spacemouse_teleop.spacemouse.command import RawSpaceMouseState
+from robot_teleop.backends.real.xarm_sdk.backend import XArmBackend
+from robot_teleop.inputs.spacemouse.polling import LatestInput, input_deadline, is_neutral
+from robot_teleop.backends.real.xarm_sdk.safety import RobotFeedback, TeleopFault, VelocityLimiter
+from robot_teleop.cli import xarm_translation as translation
+from robot_teleop.cli.xarm_teleop import process_input, run_loop
+from robot_teleop.inputs.spacemouse import TeleopCore
+from robot_teleop.inputs.spacemouse.command import RawSpaceMouseState
 
 
 def raw(t=10., axes=(0.,)*6, **kwargs):

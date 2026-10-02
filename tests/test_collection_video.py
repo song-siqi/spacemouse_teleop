@@ -20,10 +20,10 @@ import cv2
 import numpy as np
 
 from test_collection_raw import fixture, read_rows, write_json, write_rows
-from spacemouse_teleop.recording import archive
-from spacemouse_teleop.recording.collection import CollectionRecorder, ROLES
-from spacemouse_teleop.recording.raw import check_episode
-from spacemouse_teleop.recording.visual import (VideoError, VideoRunner, VisualReader, file_sha256,
+from robot_teleop.recording import archive
+from robot_teleop.recording.legacy_xarm import CollectionRecorder, ROLES
+from robot_teleop.recording.raw import check_episode
+from robot_teleop.recording.visual import (VideoError, VideoRunner, VisualReader, file_sha256,
                                                storage_config, validate_video, video_preflight)
 
 
@@ -220,20 +220,20 @@ class VideoProcessTests(unittest.TestCase):
         popen=subprocess.Popen
         def start(*a,**kw):
             process=popen(*a,**kw); created.append(process); return process
-        with patch('spacemouse_teleop.recording.visual.subprocess.Popen',start):
+        with patch('robot_teleop.recording.visual.subprocess.Popen',start):
             with self.assertRaisesRegex(ValueError,'timed out'):
                 VideoRunner(time.monotonic()+.1).run([sys.executable,'-c','import time; time.sleep(30)'])
         self.assertTrue(created)
         self.assertTrue(all(p.poll() is not None for p in created))
 
     def test_missing_tool_has_no_png_fallback(self):
-        with patch('spacemouse_teleop.recording.visual.shutil.which',return_value=None):
+        with patch('robot_teleop.recording.visual.shutil.which',return_value=None):
             with self.assertRaisesRegex(ValueError,'fallback is disabled'): video_preflight()
         self.assertEqual(storage_config(),{'mode':'png'})
         with self.assertRaises(ValueError): storage_config({'mode':'guess'})
 
     def test_quit_stops_backend_before_archive_or_source_cleanup(self):
-        from spacemouse_teleop.cli.xarm_collect import main
+        from robot_teleop.cli.xarm_collect import main
         calls=[]
         recorder=MagicMock()
         recorder.metadata={}
@@ -246,12 +246,12 @@ class VideoProcessTests(unittest.TestCase):
         cameras=MagicMock(); cameras.latest_frames.return_value={k:None for k in ROLES}
         cameras.close.side_effect=lambda:calls.append('camera_join')
         with contextlib.ExitStack() as stack:
-            for name,value in [('CollectionRecorder',recorder),('XArmCameraBackend',backend),
+            for name,value in [('CollectionRecorder',recorder),('ObservedXArmBackend',backend),
                                ('CameraGroup',cameras),('StatePoller',MagicMock()),
                                ('Preview',MagicMock()),('LatestInput',MagicMock()),
                                ('TimestampedReportReceiver',types.SimpleNamespace(sequence=1,error=None,start=lambda:None,close=lambda:None))]:
-                stack.enter_context(patch('spacemouse_teleop.cli.xarm_collect.'+name,return_value=value))
-            stack.enter_context(patch('spacemouse_teleop.cli.xarm_collect.run_loop',side_effect=KeyboardInterrupt))
+                stack.enter_context(patch('robot_teleop.cli.xarm_collect.'+name,return_value=value))
+            stack.enter_context(patch('robot_teleop.cli.xarm_collect.run_loop',side_effect=KeyboardInterrupt))
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
             self.assertEqual(main(['--task','quit_order']),0)
@@ -260,9 +260,9 @@ class VideoProcessTests(unittest.TestCase):
         recorder.stop_episode.assert_called_once_with('interrupted',incomplete=True)
 
     def test_preflight_failure_precedes_robot_connection(self):
-        from spacemouse_teleop.cli.xarm_collect import main
-        with patch.object(CollectionRecorder,'preflight',side_effect=VideoError('missing encoder')), \
-             patch('spacemouse_teleop.cli.xarm_collect.XArmCameraBackend') as backend, \
+        from robot_teleop.cli.xarm_collect import main
+        with patch('robot_teleop.cli.xarm_collect.CollectionRecorder.preflight',side_effect=VideoError('missing encoder')), \
+             patch('robot_teleop.cli.xarm_collect.ObservedXArmBackend') as backend, \
              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(main(['--task','preflight_test']),1)
         backend.assert_not_called()

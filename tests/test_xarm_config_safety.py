@@ -7,12 +7,12 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from spacemouse_teleop.backends.xarm_sdk.config import DEFAULT_CONFIG, XArmConfig
-from spacemouse_teleop.backends.xarm_sdk.safety import RobotFeedback, TeleopFault, VelocityLimiter, check_feedback, check_site
-from spacemouse_teleop.cli.common import load_config
-from spacemouse_teleop.cli.xarm_teleop import build_parser
-from spacemouse_teleop.spacemouse import TeleopCore
-from spacemouse_teleop.spacemouse.command import RawSpaceMouseState, TeleopCommand
+from robot_teleop.backends.real.xarm_sdk.config import DEFAULT_CONFIG, XArmConfig
+from robot_teleop.backends.real.xarm_sdk.safety import RobotFeedback, TeleopFault, VelocityLimiter, check_feedback, check_site
+from robot_teleop.cli.common import load_config
+from robot_teleop.cli.xarm_teleop import build_parser
+from robot_teleop.inputs.spacemouse import TeleopCore
+from robot_teleop.inputs.spacemouse.command import RawSpaceMouseState, TeleopCommand
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -181,7 +181,7 @@ class OptionalWorkspaceTest(unittest.TestCase):
             config.require_live_settings()
 
     def test_disabled_box_does_not_clip_teleop_or_home_but_keeps_speed_and_tool_checks(self):
-        from spacemouse_teleop.backends.xarm_sdk.safety import check_homing_site
+        from robot_teleop.backends.real.xarm_sdk.safety import check_homing_site
         config = live_config()
         config.site['workspace_limits_enabled'] = False
         config.site['max_linear_accel_mps2'] = None

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from spacemouse_teleop.cli.mujoco_gripper_press_probe import main
+from robot_teleop.cli.mujoco_gripper_press_probe import main
 
 
 if __name__ == "__main__":
