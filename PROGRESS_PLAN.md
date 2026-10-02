@@ -1,5 +1,10 @@
 # PROGRESS_PLAN
 
+2026-10-02 update: active development is now the multi-robot/backend refactor on
+`dev/sim/mujoco`. See `docs/refactor_status.md` and the current README for its
+validation and remaining work. The sections below preserve historical real-robot
+milestones; they are not post-refactor hardware acceptance evidence.
+
 更新日期：2026-09-11
 
 当前基线：**2026-09-11 已完成现场验收的 raw v3 高频录制版本。后续开发以此版本为基础；C5 录制里程碑保持完成，下一阶段在本仓库实现独立的离线数据处理流程，先确定时间基准与对齐方案。**
