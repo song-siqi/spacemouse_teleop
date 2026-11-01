@@ -63,6 +63,8 @@ class TranslationConfigTests(unittest.TestCase):
         self.assertEqual(config.reader['poll_hz'], 250)
         self.assertEqual(config.gripper['poll_hz'], 20)
         self.assertEqual(config.teleop.max_linear_speed_mps, .03)
+        self.assertEqual(config.site['expected_tcp_offset_mm_rad'], [0, 0, 172, 0, 0, 0])
+        self.assertEqual(config.site['expected_payload_kg_com_mm'], [0.991, 14.5, -3.23, 61.24])
         self.assertEqual(demo.read_bytes(), before)
         self.assertEqual(translation.load_profile()[0].robot['ip'], '192.168.1.209')
 

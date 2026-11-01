@@ -1,5 +1,11 @@
 # Refactor Acceptance Status
 
+2026-11-01 xArm adaptation update: see [the adaptation record](xarm_main_adaptation.md)
+for current-site tool/camera settings, explicit H demo homing, bounded per-episode
+validation, valid-source health checks and v3/v4 replay evidence. Hardware acceptance
+for this adaptation remains pending. The measurements below are the original
+2026-10-02 refactor baseline.
+
 Implementation baseline: `origin/dev/sim/mujoco` at `09ec8d8`, fast-forwarded to
 `origin/dev/real/xarm6` at `4b63902`. Work is on `dev/sim/mujoco`.
 

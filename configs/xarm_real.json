@@ -1,9 +1,24 @@
 {
   "schema_version": 1,
-  "robot": {"name": "xarm6"},
-  "end_effector": {"name": "xarm_gripper"},
-  "backend": {"name": "xarm_sdk", "config": "spacemouse_xarm6_demo.json"},
-  "setup": {"name": "site_settings_in_sdk_config", "calibration": "requires_review_before_live_use"},
-  "input": {"name": "spacemouse"},
-  "recording": {"format_version": 4, "config": "xarm_collection.json"}
+  "robot": {
+    "name": "xarm6"
+  },
+  "end_effector": {
+    "name": "xarm_gripper"
+  },
+  "backend": {
+    "name": "xarm_sdk",
+    "config": "spacemouse_xarm6_demo.json"
+  },
+  "setup": {
+    "name": "site_settings_in_sdk_config",
+    "calibration": "requires_review_before_live_use"
+  },
+  "input": {
+    "name": "spacemouse"
+  },
+  "recording": {
+    "format_version": 4,
+    "config": "spacemouse_xarm6_collection.json"
+  }
 }

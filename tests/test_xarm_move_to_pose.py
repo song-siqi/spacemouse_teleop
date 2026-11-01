@@ -53,7 +53,8 @@ class Robot:
     def snapshot(self):
         s = dict(axis=6, robot_type=6, received_at=self.clock.now(), mode=0 if self.active else 5,
                  report_state=2, pose_mm_deg=POSE.copy(), state=2, cmdnum=0, error_code=0, warn_code=0,
-                 tcp_offset_mm_rad=[0]*6, world_offset_mm_rad=[0]*6, payload_kg_com_mm=[.82, 0, 0, 0],
+                 tcp_offset_mm_rad=[0, 0, 172, 0, 0, 0], world_offset_mm_rad=[0]*6,
+                 payload_kg_com_mm=[0.991, 14.5, -3.23, 61.24],
                  motor_enable=63, motor_brake=63, query_before=self.clock.now(), query_after=self.clock.now())
         if not self.sent:
             s.update(self.initial)
@@ -182,7 +183,8 @@ class SessionTests(unittest.TestCase):
         changes = [dict(axis=7), dict(robot_type=7), dict(state=1), dict(state=3), dict(cmdnum=1),
                    dict(error_code=10), dict(warn_code=1), dict(tcp_offset_mm_rad=[0, 0, 0, .01, 0, 0]),
                    dict(world_offset_mm_rad=[1, 0, 0, 0, 0, 0]), dict(pose_mm_deg=[math.nan]*6),
-                   dict(payload_kg_com_mm=[math.nan]*4)]
+                   dict(payload_kg_com_mm=[math.nan]*4), dict(tcp_offset_mm_rad=[0]*6),
+                   dict(payload_kg_com_mm=[.82, 0, 0, 0])]
         for change in changes:
             with self.subTest(change=change):
                 self.setUp()

@@ -14,6 +14,7 @@ from uuid import uuid4
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+SITE_CONFIG = REPO_ROOT / 'configs' / 'spacemouse_xarm6_demo.json'
 SDK_VERSION = "1.18.4"
 REPORT_TIMEOUT = 1.0
 SETUP_TIMEOUT = 5.0
@@ -49,6 +50,13 @@ def vector(values, count, name):
     return list(values)
 
 
+def site_settings():
+    """Use the same measured tool as demo/collection, without importing teleop."""
+    site = json.loads(SITE_CONFIG.read_text(encoding='utf-8'))['site']
+    return {name: vector(site[name], size, name) for name, size in (
+        ('expected_tcp_offset_mm_rad', 6), ('expected_payload_kg_com_mm', 4))}
+
+
 def orientation_error_deg(a, b):
     def rotation(rpy):
         r, p, y = map(math.radians, rpy)
@@ -62,7 +70,7 @@ def orientation_error_deg(a, b):
 def build_parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--pose', nargs=6, type=float, required=True, metavar=('X', 'Y', 'Z', 'ROLL', 'PITCH', 'YAW'),
-                   help='Absolute base-frame TCP pose: mm and degrees; zero TCP/world offsets required.')
+                   help='Absolute base-frame calibrated TCP pose: mm and degrees; demo tool settings and zero world offset required.')
     p.add_argument('--ip', default='192.168.1.209')
     p.add_argument('--speed', type=float, default=10., help='SDK Cartesian speed, mm/s (not an angular speed limit).')
     p.add_argument('--accel', type=float, default=50., help='SDK Cartesian acceleration, mm/s^2.')
@@ -237,14 +245,18 @@ class SDKRobot:
         self.api.disconnect()
 
 
-def check_snapshot(s, *, stationary=False, running=False):
+def check_snapshot(s, site, *, stationary=False, running=False):
     if s['axis'] != 6 or s['robot_type'] != 6:
         raise MoveError('Connected robot is not xArm6')
     vector(s['pose_mm_deg'], 6, 'actual pose')
-    vector(s['payload_kg_com_mm'], 4, 'payload')
-    for name in ('tcp_offset_mm_rad', 'world_offset_mm_rad'):
-        if any(abs(v) > 1e-6 for v in vector(s[name], 6, name)):
-            raise MoveError(f'{name} must be zero; robot configuration was not changed')
+    for name, expected, tolerance in (
+        ('tcp_offset_mm_rad', site['expected_tcp_offset_mm_rad'], (1e-6,) * 6),
+        ('payload_kg_com_mm', site['expected_payload_kg_com_mm'], (.01, 1., 1., 1.)),
+        ('world_offset_mm_rad', [0.] * 6, (1e-6,) * 6),
+    ):
+        observed = vector(s[name], len(expected), name)
+        if any(abs(a-b) > t for a, b, t in zip(observed, expected, tolerance)):
+            raise MoveError(f'{name} mismatch: expected {expected}, got {observed}; robot configuration was not changed')
     for name in ('state', 'mode', 'cmdnum', 'error_code', 'warn_code'):
         if not isinstance(s[name], int) or s[name] < 0:
             raise MoveError(f'Invalid {name}')
@@ -260,21 +272,23 @@ def check_snapshot(s, *, stationary=False, running=False):
 class MoveSession:
     def __init__(self, robot, log, clock=time.monotonic, sleep=time.sleep):
         self.robot, self.log, self.clock, self.sleep = robot, log, clock, sleep
+        self.site = site_settings()
         self.may_have_motion = False
 
     def run(self, args):
         self.robot.connect()
         initial = self.robot.snapshot()
         self.log.write('initial', snapshot=initial, **self.robot.initial_details())
-        check_snapshot(initial, stationary=True)
+        self.log.write('expected_tool', config=str(SITE_CONFIG), **self.site)
+        check_snapshot(initial, self.site, stationary=True)
         self.log.write('preflight', **self.robot.preflight(args.pose))
         # Recheck after preflight: no blind mode switch based on an old snapshot.
-        check_snapshot(self.robot.snapshot(), stationary=True)
+        check_snapshot(self.robot.snapshot(), self.site, stationary=True)
         self.robot.activate()
         activated_at = self.clock()
         while True:
             s = self.robot.snapshot()
-            check_snapshot(s, stationary=True)
+            check_snapshot(s, self.site, stationary=True)
             if (s['received_at'] >= activated_at and s['mode'] == 0 and s['state'] in (0, 2)
                     and s['motor_enable'] & 63 == 63 and s['motor_brake'] & 63 == 63 and self.robot.ready()):
                 break
@@ -297,7 +311,7 @@ class MoveSession:
             s = self.robot.snapshot()
             if self.clock() >= deadline:
                 raise MoveError('Motion timed out while querying feedback')
-            check_snapshot(s, running=True)
+            check_snapshot(s, self.site, running=True)
             position_error = math.dist(s['pose_mm_deg'][:3], args.pose[:3])
             rotation_error = orientation_error_deg(s['pose_mm_deg'][3:], args.pose[3:])
             # State 0 means START, not completion. Require STOP(2) and empty queue.

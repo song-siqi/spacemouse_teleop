@@ -25,13 +25,13 @@ class CollectionConfig:
         path = Path(path).expanduser().resolve()
         data = json.loads(path.read_text())
         if not isinstance(data, dict) or data.get("schema_version") not in (2, 3):
-            raise ValueError("Raw v3 requires collection schema_version 2. Migrate the collection config: "
+            raise ValueError("Raw v4 requires collection schema_version 2 or 3. Migrate the collection config: "
                              "replace sample_hz/robot_poll_hz/quality with native source, buffers and queues. "
                              "Existing v1/v2 data remains readable.")
         obsolete = {"sample_hz", "robot_poll_hz", "quality", "queue_size", "export_fps"} & data.keys()
         if obsolete: raise ValueError(f"Online alignment settings are not supported: {sorted(obsolete)}")
         if data.get("robot_state_source") != "tcp30000":
-            raise ValueError("Raw v3 requires passive tcp30000; no silent polling fallback")
+            raise ValueError("Raw v4 requires passive tcp30000; no silent polling fallback")
         real_path = (path.parent / data["robot_config"]).resolve()
         robot = XArmConfig.load(real_path, ip=ip)
         cameras = data["cameras"]

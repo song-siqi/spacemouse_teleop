@@ -41,24 +41,34 @@ class Source:
 class RawEpisode:
     """One bounded queue and independent writer per source; fault evidence survives."""
     def __init__(self, path, sources, *, clock="simulation", epoch=0, capacity=256,
-                 metadata=None, video_factory=StreamingVideo):
-        if capacity < 1:
-            raise ValueError("Queue capacity must be positive")
+                 metadata=None, video_factory=StreamingVideo, visual_storage=None,
+                 validation_profile=None):
+        capacities = {s.id: capacity[s.id] if isinstance(capacity, dict) else capacity for s in sources}
+        if any(isinstance(v, bool) or not isinstance(v, int) or v < 1 for v in capacities.values()):
+            raise ValueError("Queue capacities must be positive integers")
         self.path = Path(path)
         self.path.mkdir(parents=True, exist_ok=False)
         self.sources = {s.id: s for s in sources}
         if len(self.sources) != len(sources):
             raise ValueError("Duplicate source IDs")
-        self.queues = {s.id: queue.Queue(capacity) for s in sources}
+        self.queues = {s.id: queue.Queue(capacities[s.id]) for s in sources}
         self.clock, self.epoch = clock, epoch
         self.errors, self.counts, self.checksums = [], {}, {}
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.stop_event = threading.Event()
         self.closed = False
         self.video_factory = video_factory
+        self.visual_storage = {**NATIVE_VIDEO_SETTINGS, **(visual_storage or {})}
+        self.encoders = {}
+        self.accepted = dict.fromkeys(self.sources, 0)
+        self.high_water = dict.fromkeys(self.sources, 0)
+        self.ranges = {}
+        self.fatal_error = None
         self.meta = {"format_version": 4, "status": "recording", "capture_complete": False,
                      "disposition": "pending", "session_clock": clock, "epoch": epoch,
-                     "metadata": metadata or {}, "sources": [], "errors": []}
+                     "metadata": metadata or {}, "sources": [], "errors": [],
+                     "validation_profile": validation_profile,
+                     "visual_storage": self.visual_storage, "queue_capacities": capacities}
         for s in sources:
             entry = asdict(s)
             entry["path"] = f"{s.id}.jsonl"
@@ -98,7 +108,12 @@ class RawEpisode:
             # Own JSON and image buffers before returning to the producer.
             row = json.loads(json.dumps(row, allow_nan=False))
             item = (row, None if rgb is None else rgb.copy(), None if packet is None else bytes(packet))
-            self.queues[source_id].put_nowait(item)
+            with self.lock:
+                if self.stop_event.is_set():
+                    return False
+                self.queues[source_id].put_nowait(item)
+                self.accepted[source_id] += 1
+                self.high_water[source_id] = max(self.high_water[source_id], self.queues[source_id].qsize())
             return True
         except (queue.Full, ValueError, TypeError) as exc:
             self.fault(f"Publish failed for {source_id}: {type(exc).__name__}")
@@ -112,7 +127,8 @@ class RawEpisode:
             if source.binary:
                 binary = (self.path / f"{source.id}.bin").open("wb")
             if source.video:
-                encoder = self.video_factory(self.path / f"{source.id}.mp4", source.video, NATIVE_VIDEO_SETTINGS)
+                encoder = self.video_factory(self.path / f"{source.id}.mp4", source.video, self.visual_storage)
+                self.encoders[source.id] = encoder
             q = self.queues[source.id]
             while not self.stop_event.is_set() or not q.empty():
                 try:
@@ -138,6 +154,10 @@ class RawEpisode:
                     binary.write(packet)
                 line(index, row)
                 count += 1
+                self.counts[source.id] = count
+                if source.id not in self.ranges:
+                    self.ranges[source.id] = {"first": row["session_time"], "last": row["session_time"]}
+                self.ranges[source.id]["last"] = row["session_time"]
             if encoder:
                 encoder.finish()
                 encoder = None
@@ -153,35 +173,81 @@ class RawEpisode:
                     self.fault(f"Close {source.id}: {exc}")
             self.counts[source.id] = count
 
-    def close(self, *, complete=True, disposition="kept"):
+    def close(self, *, complete=True, disposition="kept", deadline=None):
         if self.closed:
             return self.meta
         if disposition not in ("kept", "discarded", "pending"):
             raise ValueError("Invalid disposition")
-        self.stop_event.set()
+        deadline = deadline if deadline is not None else time.monotonic() + 120.
+        with self.lock:
+            self.stop_event.set()
         for thread in self.threads:
-            thread.join()
+            thread.join(max(0., deadline - time.monotonic()))
+        if any(t.is_alive() for t in self.threads):
+            for encoder in list(self.encoders.values()):
+                try:
+                    encoder.abort()
+                except Exception as exc:
+                    self.fault(f"Encoder abort: {exc}")
+            for thread in self.threads:
+                thread.join(2.)
+            self.fault("Writer drain timed out")
+        if any(t.is_alive() for t in self.threads):
+            self.fatal_error = "Recording writer did not stop"
+            self.fault(self.fatal_error)
         for source in self.sources.values():
             if source.required and not self.counts.get(source.id):
                 self.fault(f"Required source empty: {source.id}")
+            if self.accepted[source.id] != self.counts.get(source.id, 0):
+                self.fault(f"Accepted samples were not all written: {source.id}")
+        starts = [r["first"] for r in self.ranges.values()]
+        ends = [r["last"] for r in self.ranges.values()]
+        self.meta.update(status="finalizing", capture_complete=False,
+                         disposition=disposition, errors=list(self.errors), counts=dict(self.counts),
+                         accepted_counts=dict(self.accepted), queue_high_water=dict(self.high_water),
+                         source_ranges=dict(self.ranges),
+                         capture_start_time=min(starts, default=None),
+                         capture_end_time=max(ends, default=None))
+        try:
+            if not self.fatal_error:
+                self.meta["checksums"] = {p.name: file_sha256(p) for p in self.path.iterdir() if p.name != "meta.json"}
+            atomic_json(self.path / "meta.json", self.meta)
+            if complete and not self.errors:
+                from .validation import validate_before_commit
+                report = validate_before_commit(self.path, deadline)
+                self.meta["validation"] = report
+                if not report["valid"]:
+                    self.fault("Validation: " + "; ".join(report["errors"]))
+        except Exception as exc:
+            self.fault(f"Finalization: {exc}")
         self.meta.update(status="complete" if complete and not self.errors else "incomplete",
-                         capture_complete=complete and not self.errors, disposition=disposition,
-                         errors=list(self.errors), counts=self.counts,
-                         checksums={p.name: file_sha256(p) for p in self.path.iterdir() if p.name != "meta.json"})
+                         capture_complete=bool(complete and not self.errors), errors=list(self.errors))
         atomic_json(self.path / "meta.json", self.meta)
         self.closed = True
         return self.meta
 
 
-def check_episode(path, require_kept=False):
+def check_episode(path, require_kept=False, *, _allow_uncommitted=False, _runner=None):
     root = Path(path).resolve()
-    errors = []
+    errors, meta = [], {}
     try:
         meta = json.loads((root / "meta.json").read_text())
-        if meta["format_version"] != 4 or meta["status"] != "complete" or not meta["capture_complete"]:
+        if meta["format_version"] != 4:
+            raise ValueError("Expected raw v4")
+        if _allow_uncommitted:
+            if meta["status"] != "finalizing" or meta.get("errors"):
+                raise ValueError("Only fault-free finalizing episodes can be validated for commit")
+        elif meta["status"] != "complete" or not meta["capture_complete"]:
             raise ValueError("Episode is not a complete raw v4 capture")
         if require_kept and meta["disposition"] != "kept":
             raise ValueError("Episode was not kept")
+        if 'start_time' in meta:
+            names = ('start_time','end_time','capture_requested_start_time','capture_requested_end_time')
+            if any(isinstance(meta.get(k),bool) or not isinstance(meta.get(k),(int,float))
+                   or not math.isfinite(meta[k]) for k in names):
+                raise ValueError('Invalid operation/capture boundaries')
+            if not meta['capture_requested_start_time'] <= meta['start_time'] <= meta['end_time'] <= meta['capture_requested_end_time']:
+                raise ValueError('Operation interval differs from capture window')
         def safe(name):
             p = (root / name).resolve()
             if not p.is_relative_to(root) or not p.is_file():
@@ -191,9 +257,10 @@ def check_episode(path, require_kept=False):
             return p
         for source in meta["sources"]:
             rows = [json.loads(s) for s in safe(source["path"]).read_text().splitlines()]
-            if len(rows) != meta["counts"][source["id"]] or (source["required"] and not rows):
+            if (len(rows) != meta["counts"][source["id"]] or (source["required"] and not rows)
+                    or meta.get("accepted_counts", {}).get(source["id"], len(rows)) != len(rows)):
                 raise ValueError("Sample count mismatch")
-            previous = previous_time = None
+            previous = previous_time = previous_session_time = None
             binary = safe(source["binary_path"]).read_bytes() if source["binary"] else None
             offset = 0
             for i, row in enumerate(rows):
@@ -201,6 +268,12 @@ def check_episode(path, require_kept=False):
                     raise ValueError("Clock identity mismatch")
                 if not all(math.isfinite(row[k]) for k in ("source_timestamp", "session_time", "host_received_at")):
                     raise ValueError("Nonfinite timestamp")
+                start, end = meta.get("capture_requested_start_time"), meta.get("capture_requested_end_time")
+                if start is not None and row["session_time"] < start or end is not None and row["session_time"] > end:
+                    raise ValueError("Sample outside capture window")
+                if previous_session_time is not None and row['session_time'] < previous_session_time:
+                    raise ValueError('Session time moved backwards within source')
+                previous_session_time = row['session_time']
                 identity = (row["clock_epoch"], row["sequence"])
                 if previous and identity[0] == previous[0] and identity[1] != previous[1] + 1:
                     raise ValueError("Sequence gap or duplicate")
@@ -221,7 +294,11 @@ def check_episode(path, require_kept=False):
                 raise ValueError("Unindexed binary bytes")
             if source["video"]:
                 v = source["video"]
-                validate_video(safe(source["video_path"]), len(rows), v["fps"], v["width"], v["height"])
+                validate_video(safe(source["video_path"]), len(rows), v["fps"], v["width"], v["height"], runner=_runner)
+        if meta.get("validation_profile"):
+            from .validation import validate_profile
+            validate_profile(root, meta)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         errors.append(str(exc))
-    return {"valid": not errors, "errors": errors, "warnings": [], "format_version": 4}
+    warnings = ["Cross-device clock mapping is not calibrated"] if isinstance(meta, dict) and meta.get("validation_profile") == "xarm" else []
+    return {"valid": not errors, "errors": errors, "warnings": warnings, "format_version": 4}

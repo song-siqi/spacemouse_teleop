@@ -1,9 +1,12 @@
 # PROGRESS_PLAN
 
-2026-10-02 update: active development is now the multi-robot/backend refactor on
-`dev/sim/mujoco`. See `docs/refactor_status.md` and the current README for its
-validation and remaining work. The sections below preserve historical real-robot
-milestones; they are not post-refactor hardware acceptance evidence.
+2026-11-01: main 架构上的 xArm 适配见 [实施与验证记录](docs/xarm_main_adaptation.md)。
+独立 demo 的 H 复位、现场标定、相机绑定及 raw v4 真机录制路径已实现；
+315 项非仿真自动测试和 mock 采集通过；5 条历史真机轨迹离线回放完成，
+4 条完整轨迹通过检查，1 条故障轨迹保持 incomplete。新架构现场验收待进行。
+原真机工作区及既有 raw v3 数据保持原样。
+R1/R2 修复沿用 main，离线同步与训练数据生成仍属后续 C6。
+以下内容为此前 raw v3 的历史验收，不作为新架构的现场验收。
 
 更新日期：2026-09-11
 

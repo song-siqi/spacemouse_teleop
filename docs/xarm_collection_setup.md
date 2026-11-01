@@ -1,11 +1,11 @@
-# xArm6 native RGB/state collection (raw v3)
+# xArm6 native RGB/state collection (raw v4)
 
 This entry point composes the existing SpaceMouse/xArm6/official-gripper teleop with independent native recording. Motion, reset and gripper behavior remain owned by `backends/xarm_sdk`. The collection environment needs no simulator or training packages. GelSight remains outside this capture.
 
 ## Environment and configuration
 
 ```bash
-uv pip install --python .venv/bin/python -e '.[hardware,xarm,collection]' -c requirements/collection-validated.txt
+uv sync --frozen --extra spacemouse --extra xarm --extra realsense --extra recording
 ```
 
 FFmpeg and ffprobe with libx264 must be available before startup. Preflight runs before hardware motion initialization; missing tools fail explicitly. The implementation supports the installed FFmpeg 4.2.7. There is no PNG fallback.
@@ -15,10 +15,10 @@ Use `configs/spacemouse_xarm6_collection.json`, schema version 2:
 | Setting | Default / meaning |
 | --- | --- |
 | `robot_config` | Existing independent `spacemouse_xarm6_demo.json`; unchanged motion settings |
-| Cameras | RGB 640×480, requested 60 fps per camera |
-| Wrist serial | `215122252880` |
-| Fixed 1 serial | `311322303615` |
-| Fixed 2 serial | `311322303806` |
+| Cameras | RGB 640×480; wrist 30 fps, fixed views 60 fps |
+| Wrist serial | `246322303938` |
+| Fixed 1 serial (side) | `151422251501` |
+| Fixed 2 serial (scene) | `231622300915` |
 | `robot_state_source` | `tcp30000`, passive native reports with device timestamps |
 | `pre_roll_s / post_roll_s` | 0.5 / 0.5 seconds |
 | `source_timeout_s` | 1 second without a valid required-source response |
@@ -27,7 +27,14 @@ Use `configs/spacemouse_xarm6_collection.json`, schema version 2:
 | `min_free_bytes` | 10 GiB reserve |
 | `visual_storage` | native_video, H.264 CRF 18, veryfast, two threads per camera, GOP 30 |
 
-Each camera's `fps` configures capture and ordinal video PTS; it does not define a training sample rate. Read-only and live recording tests measured approximately 59.65/59.65/59.76 fps; 60 is the requested mode, not a promise of exact 1/60-second sampling. Use per-frame source times. GOP 30 remains unchanged (about 0.5 seconds at the configured rate). Three frame counts may differ. State reports are recorded whenever returned, with no polling-rate enforcement. Live gripper feedback retains its existing worker cadence; observe-only requests it at 20 Hz independently.
+The camera bindings were updated on 2026-10-22 to match the replacement devices
+and station roles in `new_bridge/config.json`. The wrist currently enumerates at
+USB 2.1 and advertises at most 30 fps for 640×480 RGB, so its configured rate is
+30 fps. To restore wrist capture at 60 fps, connect it through a working USB 3
+path, verify the advertised mode and update its `fps`. Close other camera consumers
+before collection; an active bridge can cause `Device or resource busy`.
+
+Each camera's `fps` configures capture and ordinal video PTS; it does not define a training sample rate. Historical read-only and live recording tests with the previous cameras at 60 fps measured approximately 59.65/59.65/59.76 fps; these do not validate the replacement devices. Use per-frame source times. GOP 30 remains unchanged (about 1 second for the wrist and 0.5 seconds for the fixed views at the configured rates). Three frame counts may differ. State reports are recorded whenever returned, with no polling-rate enforcement. Live gripper feedback retains its existing worker cadence; observe-only requests it at 20 Hz independently.
 
 Old schema/version or production keys `sample_hz`, `robot_poll_hz`, `quality` (age/skew pairing thresholds), `export_fps`, and old storage modes are rejected with a migration message. Start from the shipped schema-v2 file and copy camera bindings, output path and robot config reference; then explicitly set queues, buffering and timeout values. Do not just relabel an old config. Existing data retain their format/version meaning.
 
@@ -45,7 +52,7 @@ Old schema/version or production keys `sample_hz`, `robot_poll_hz`, `quality` (a
 Both finite test modes automatically start and keep one successfully completed episode. Allow the configured tail and video validation to finish. Check the printed exit status and the episode path:
 
 ```bash
-.venv/bin/spacemouse-collection-check /absolute/path/to/episodes/episode_000001 --require-kept
+.venv/bin/robot-teleop check /absolute/path/to/episodes/episode_000001 --require-kept
 ```
 
 The command fully decodes three videos and verifies native source/index/binary counts, checksums and shared clock evidence. It does not create a dataset derivative.
@@ -81,17 +88,33 @@ Pre-roll cannot include preparation or a preceding discontinuity. Normal end sav
 
 ## Interpret the artifacts
 
-See [the full raw v3 contract](collection_format.md). There are three MP4 videos, three frame JSONL indexes, native robot JSONL plus exact binary packets, independent gripper/auxiliary JSONL, and session control/events/clock evidence.
+The new real entry writes raw v4. Each episode declares its sources in `meta.json`.
+Camera videos and indexes are `<role>.mp4` / `<role>.jsonl`; robot evidence is
+`robot.bin` / `robot.jsonl`, with `gripper.jsonl`, `report.jsonl` and `commands.jsonl`.
+Each index retains native fields in `values`, alongside `source_timestamp`,
+`host_received_at`, `session_time`, source/session epochs and sequence. Robot
+microsecond integers, frame metadata and gripper query intervals remain unchanged.
 
-Video PTS is an ordinal locator, not real trajectory time. Use original camera timestamps/domains, frame metadata, robot device timestamps, host receive times and repeated host clock brackets as evidence. Global-time metadata does not establish hardware sync, and the robot's unknown epoch/latency is not corrected.
+`start_time/end_time` are the two Space times; requested and actual capture ranges,
+end reason, accepted/written counts, queue peaks and lifecycle events are preserved.
+Video PTS is ordinal, not an exposure timestamp. No clock fitting, latency
+subtraction, aligned observations or training actions are performed.
 
-The collection entry does not create aligned observations or training actions.
-Offline alignment and data processing are planned within this repository, with
-separate configuration, commands and derived output. The raw reader/checker
-already exists; the full processing pipeline and its CLI are not implemented yet.
-20 Hz observations, quality rules and output formats will be specified separately;
-delta, gripper mapping and action definitions remain later decisions. Keep the
-entire session and all raw files unchanged.
+Every episode is drained and validated before `complete`: full video decoding,
+indexes/counts/PTS, checksums, xArm original bytes versus decoded values, and shared
+clock/session evidence. Validation runs in an owned subprocess with a deadline of
+`max(120 seconds, 2 * recording duration)` and cannot block the motion loop or the
+source-event consumer. K/X/N wait for finalization; failures retain incomplete data.
+After ending recording, center the knob and allow finalization to finish.
+
+SDK feedback-limited sends can return `waiting_for_feedback`. Preview counters
+separate successful sends and waits; 60 Hz loop rate does not assert 60 actual
+sends per second. Native TCP 30000 capture remains independent of that control
+feedback cadence. Invalid samples are saved but do not refresh source health.
+
+Keep the whole session: the episode links to session/control/events/clock evidence.
+The new reader/checker also reads existing raw v3 in place; no old recording is
+migrated, rewritten or reinterpreted with the current station calibration.
 
 ## Failure and legacy data
 
@@ -100,40 +123,27 @@ Queue overflow, encoder/write failure or a stopped required source creates an in
 Old v1 PNG and v2 video data remain readable/checkable with their original semantics. Existing v2 archives with normal-capture evidence can be recovered:
 
 ```bash
-.venv/bin/spacemouse-collection-finalize /absolute/path/to/v2/episode_000001
+.venv/bin/robot-teleop finalize /absolute/path/to/v2/episode_000001
 ```
 
-This command does not migrate v1, repair capture gaps or finalize raw v3. See [legacy format semantics](collection_format_v1_v2.md).
+This command does not migrate v1, repair capture gaps or finalize raw v3/v4. See [legacy format semantics](collection_format_v1_v2.md).
 
-## Acceptance scope
+## Validation scope
 
-See [raw v3 validation](collection_raw_v3_validation.md) for this implementation's tests and recordings. Historical [query-frequency](collection_frequency_validation.md), [motion](collection_motion_validation.md) and [v2 video](collection_video_field_validation.md) experiments remain evidence for their original workloads. The [timing report](collection_timing_report.md) preserves the earlier experiments and now identifies their historical scope.
+See [the main-architecture adaptation record](xarm_main_adaptation.md) for current
+software validation and read-only replay of historical real data. The earlier
+[raw v3 validation](collection_raw_v3_validation.md) documents pre-migration
+hardware behavior; it does not certify the newly adapted entry on hardware.
 
-The high-rate raw recording milestone is complete as of **2026-09-11**. Existing
-211-test non-simulator results and the 60-second read-only baseline are retained.
-Two live sessions added three complete/kept episodes (32,403 frames), including
-two consecutive recordings. Full video, frame index, native packet and checksum
-checks passed with no gaps or invalid states in the saved intervals. Control sends
-remained about 60 Hz during recording. See the dated validation report for exact
-windows and counts.
+Current station bindings are wrist/fixed_1/fixed_2 at 30/60/60 fps. Earlier 60 fps
+measurements used different camera bindings. Full input sessions and generated
+replay artifacts are local data, not Git content. Replay never commands a robot
+and does not constitute a new physical demonstration.
 
-The live episodes plus control records from their capture windows used about
-**89–90 MB per captured minute** (decimal MB); full-session waiting and reset logs
-are additional. The older static read-only result was 74.06 MB/minute. Neither is
-a universal capacity guarantee. No temporary PNGs are written; retain the 10 GiB
-reserve and measure longer/new scenes before budgeting a batch.
+The output filesystem must retain 10 GiB free. On 2026-11-01 the current `/home`
+filesystem had less than this, so production preflight correctly refused capture.
+Free space or choose an adequately sized `--output` filesystem before live use;
+the production reserve is not automatically lowered.
 
-Finalization is outside the selected demonstration interval. Previous 146/172 ms
-send gaps and camera frame-number gaps occurred after capture had closed; the
-latest centered-knob trial had no gaps and a 27.29 ms maximum send interval during
-finalization. These observations do not change raw integrity checks or prove a
-runtime fix. Finalization scheduling, N/X coverage in this configuration and
-long-duration stress tests remain separate follow-ups, not blockers for the
-completed raw recording milestone.
-
-Device measurement timing and cross-device clock calibration remain unresolved;
-acquisition integrity is not synchronized observation quality. The next planned
-stage is offline data processing in this repository: establish clock mappings,
-select frames/interpolate states, report alignment quality and write separate
-versioned outputs. This documentation update adds no processing implementation.
-See [C6 in the progress plan](../PROGRESS_PLAN.md#c6--本仓库离线数据处理计划中尚未实现).
+Offline alignment and training export remain planned in this repository, with
+separate configuration and outputs; they are not implemented in this migration.

@@ -32,6 +32,9 @@ class CollectionCoordinator:
         return items
 
     def check_exit(self):
+        fatal = self.recorder.status().get('fatal_error')
+        if fatal:
+            raise RuntimeError(f'Recording worker cleanup failed: {fatal}')
         if getattr(self, 'exit_event', None) is not None and self.exit_event.is_set():
             self.quit_requested = True
         for event in self._drain():

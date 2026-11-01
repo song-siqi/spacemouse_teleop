@@ -44,7 +44,7 @@ class MockReadOnlyChannel:
 
 def provenance(mode):
     packages = {}
-    for name in ('spacemouse-teleop','pyrealsense2','numpy','opencv-python','xarm-python-sdk','pyspacemouse'):
+    for name in ('robot-teleop','pyrealsense2','numpy','opencv-python','xarm-python-sdk','pyspacemouse'):
         try:
             packages[name] = version(name)
         except PackageNotFoundError:
@@ -95,7 +95,7 @@ def main(argv=None):
         config = CollectionConfig.load(args.config,ip=args.ip)
         data, robot = config.data, config.robot
         if not args.dry_run and any(not c.get('serial') for c in data['cameras']):
-            raise ValueError('Bind all three camera serials before opening live cameras')
+            raise ValueError('Bind all configured camera serials before opening live cameras')
         if not (args.dry_run or args.observe_only):
             config.require_live()
         mode = 'mock' if args.dry_run else ('read_only' if args.observe_only else 'teleop')

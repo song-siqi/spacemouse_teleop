@@ -93,6 +93,23 @@ rewriting the measured pose. `--collision-debug --viewer` shows contact proxies.
 
 ## Real Robot Routes
 
+The current xArm-specific adaptation is documented in
+[the adaptation record](docs/xarm_main_adaptation.md). Demo starts at the current
+pose, H opens the gripper and homes, and its default duration is unlimited.
+Collection retains automatic opening/homing followed by explicit Space recording.
+The production wrist/fixed_1/fixed_2 camera rates are 30/60/60 fps; tool TCP offset
+is `[0,0,172,0,0,0]` mm/rad and payload/COM is
+`[0.991,14.5,-3.23,61.24]` kg/mm. These settings are checked, not written to the robot.
+
+```sh
+./scripts/run_xarm_demo.sh
+./scripts/run_xarm_translation.sh
+./scripts/run_xarm_collection.sh --task pick_place
+# Unified equivalent of the demo, including terminal H:
+uv run robot-teleop teleop --backend xarm_sdk --profile demo --config configs/spacemouse_xarm6_demo.json
+```
+
+
 Install only the required extras: `spacemouse`, `xarm`, `realsense`, `recording`.
 The `sim` extra does not install RealSense. Review site settings before any live
 command. Live configuration remains deliberately explicit; no simulation defaults
@@ -105,8 +122,8 @@ uv run robot-teleop collect --backend xarm_sdk --task mock_check --dry-run --hea
 uv run robot-teleop teleop --backend xarm_sdk --config configs/spacemouse_xarm6_demo.json --input mock --dry-run --duration 2
 ```
 
-Real teleop and translation preserve the existing preparation/neutral-input
-lifecycle. `move-to-pose` retains its explicit SDK prechecks and dry-run route.
+Base real teleop, collection and translation preserve automatic preparation and
+neutral-input checks; the demo profile uses explicit terminal H for homing. `move-to-pose` retains its explicit SDK prechecks and dry-run route.
 `configs/xarm_real.json` references the SDK and collection configurations. The
 real command route still uses its specialized lifecycle, rather than the generic
 simulation runner; this boundary is intentional and remains migration work.
@@ -120,6 +137,12 @@ units, frame, clock, required status and paths. State and command streams remain
 separate; video is MP4 plus frame indexes, native packets are binary plus indexed
 offsets and checksums. Source timestamps and host arrival evidence are retained.
 Video PTS is ordinal/fps, not a fitted physical capture timestamp.
+
+Each new xArm episode preserves exact Space start/end, end reason and capture
+ranges. It is fully checked in a bounded validation subprocess before complete,
+including native xArm packet semantics. While it finalizes, source ingestion and
+control logging continue; keep/discard and the next reset wait for completion.
+Every invalid response is retained but cannot refresh the valid-source timeout.
 
 The generic writer supports arbitrary joint counts and 0..N cameras. SDK camera
 configuration schema 3 supports arbitrary roles; historical schema 2 retains its

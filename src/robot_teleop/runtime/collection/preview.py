@@ -38,7 +38,7 @@ def _window(updates, events, quit_event):
                 banner = np.zeros((120,canvas.shape[1],3),dtype=np.uint8)
                 lines = [f"Motion: {status.get('motion_phase')} | Record: {status.get('state')} | Episode: {status.get('episode_id')} | Frames: {status.get('frame_counts',{})} | Robot: {status.get('state_counts',{}).get('robot',0)}",
                          'Space: start/end | K: keep | X: discard | N: open gripper + reset | Q: stop robot and exit',
-                         str(status.get('error') or status.get('instruction') or status.get('message') or '')[:170]]
+                         str(status.get('error') or status.get('instruction') or status.get('message') or '')[:170] + f" | sends/waits: {status.get('control_stats',{})}"]
                 for index,line in enumerate(lines):
                     color = (0,0,255) if index == 2 and status.get('error') else (255,255,255)
                     cv2.putText(banner,line,(8,25+index*32),cv2.FONT_HERSHEY_SIMPLEX,.55,color,1)

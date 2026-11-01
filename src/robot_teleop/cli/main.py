@@ -35,10 +35,11 @@ def main(argv=None):
             modules = {"teleop": "xarm_teleop", "collect": "xarm_collect", "diagnose": "xarm_diagnose"}
             if "--profile" in argv:
                 i = argv.index("--profile")
-                if argv[i+1] != "translation" or argv[0] != "teleop":
-                    raise ValueError("Only translation teleop profile is supported")
+                if argv[i+1] not in ("translation", "demo") or argv[0] != "teleop":
+                    raise ValueError("Only demo and translation teleop profiles are supported")
+                profile = argv[i+1]
                 del argv[i:i+2]
-                modules["teleop"] = "xarm_translation"
+                modules["teleop"] = "xarm_" + profile
             return importlib.import_module(f"robot_teleop.cli.{modules[argv[0]]}").main(argv[1:])
     parser = argparse.ArgumentParser(prog="robot-teleop")
     parser.add_argument("command", choices=("teleop", "collect", "diagnose", "move-to-pose", "check", "finalize"))

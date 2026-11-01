@@ -4,21 +4,21 @@
   "cameras": [
     {
       "role": "wrist",
-      "serial": "215122252880",
+      "serial": "246322303938",
       "width": 640,
       "height": 480,
-      "fps": 60
+      "fps": 30
     },
     {
       "role": "fixed_1",
-      "serial": "311322303615",
+      "serial": "151422251501",
       "width": 640,
       "height": 480,
       "fps": 60
     },
     {
       "role": "fixed_2",
-      "serial": "311322303806",
+      "serial": "231622300915",
       "width": 640,
       "height": 480,
       "fps": 60

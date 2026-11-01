@@ -42,8 +42,9 @@ def load_profile(path=DEFAULT_CONFIG, ip=None):
         raise ValueError('Translation profile reserves buttons for the gripper, not mode switching')
     if not config.robot['homing']['enabled'] or not config.gripper['enabled']:
         raise ValueError('Translation profile requires startup homing and the official gripper')
-    if config.site['expected_tcp_offset_mm_rad'] != [0] * 6:
-        raise ValueError('Translation profile requires the existing zero TCP offset convention')
+    if (config.site['expected_tcp_offset_mm_rad'] is None
+            or config.site['expected_tcp_offset_mm_rad'][3:] != [0] * 3):
+        raise ValueError('Translation profile requires zero TCP rotation offset for its downward convention')
     return config, float(tolerance)
 
 
