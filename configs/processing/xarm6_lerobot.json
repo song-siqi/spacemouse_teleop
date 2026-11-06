@@ -1,0 +1,12 @@
+{
+  "robot": "xarm6",
+  "fps": 20,
+  "action_mode": "delta_joint_position",
+  "gripper_open": 850,
+  "gripper_closed": 230,
+  "required_cameras": [
+    "wrist",
+    "fixed_1",
+    "fixed_2"
+  ]
+}

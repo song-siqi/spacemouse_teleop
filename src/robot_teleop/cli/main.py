@@ -23,7 +23,7 @@ def main(argv=None):
                     argv[i+1] = section["config"]
                     argv.extend(("--backend", "xarm_sdk"))
     # Preserve mature real-robot lifecycle checks behind the unified entry point.
-    dispatch = {"move-to-pose": "xarm_move_to_pose", "check": "collection_check", "finalize": "collection_finalize"}
+    dispatch = {"process": "process", "dataset-check": "dataset_check", "replay": "replay", "move-to-pose": "xarm_move_to_pose", "check": "collection_check", "finalize": "collection_finalize"}
     if argv and argv[0] in dispatch:
         return importlib.import_module(f"robot_teleop.cli.{dispatch[argv[0]]}").main(argv[1:])
     if "--backend" in argv:
@@ -42,7 +42,7 @@ def main(argv=None):
                 modules["teleop"] = "xarm_" + profile
             return importlib.import_module(f"robot_teleop.cli.{modules[argv[0]]}").main(argv[1:])
     parser = argparse.ArgumentParser(prog="robot-teleop")
-    parser.add_argument("command", choices=("teleop", "collect", "diagnose", "move-to-pose", "check", "finalize"))
+    parser.add_argument("command", choices=("teleop", "collect", "diagnose", "move-to-pose", "check", "finalize", "process", "dataset-check", "replay"))
     parser.add_argument("--config", default="configs/xarm_sim.json")
     parser.add_argument("--duration", type=float, default=3.)
     parser.add_argument("--output", type=Path)

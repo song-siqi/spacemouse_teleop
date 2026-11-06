@@ -60,6 +60,7 @@ class GripperWorker:
         if self._stop.is_set():
             return
         intent, deadline = pending if pending is not None else ('hold', self.clock())
+        waiting_for_lease = False
         expired = intent != 'hold' and self.clock() >= deadline
         if expired:
             self._hold(status)
@@ -68,24 +69,30 @@ class GripperWorker:
             self._hold(status)
         elif intent != self._applied_intent:
             if deadline - self.clock() <= self.config['socket_timeout_s']:
+                # Arm feedback can shorten an otherwise fresh held-button lease.
+                # Do not start a target that cannot fit its bounded transaction;
+                # keep holding and let the next tick re-read the newest lease.
+                # Actual expiry above and communication failures remain faults.
                 self._hold(status)
-                raise TeleopFault('Gripper held input expired before send')
-            position = status['position_pulse']
-            endpoint = self.config[f'{intent}_pulse']
-            direction = 1 if intent == 'open' else -1
-            if direction * (endpoint - position) <= 0:
-                # A new direction may start beyond its allowed endpoint. Cancel
-                # an existing goal without commanding further into that boundary.
-                self._hold(status, force=True)
+                waiting_for_lease = True
             else:
-                # The SDK writes a position target, not a streamed velocity.
-                # Leave it unchanged while held; the device controls motion speed.
-                # Set this before I/O so cleanup holds even if the ACK is lost.
-                self._jogging = True
-                self._send_target(endpoint)
-            self._applied_intent = intent
+                position = status['position_pulse']
+                endpoint = self.config[f'{intent}_pulse']
+                direction = 1 if intent == 'open' else -1
+                if direction * (endpoint - position) <= 0:
+                    # A new direction may start beyond its allowed endpoint. Cancel
+                    # an existing goal without commanding further into that boundary.
+                    self._hold(status, force=True)
+                else:
+                    # The SDK writes a position target, not a streamed velocity.
+                    # Leave it unchanged while held; the device controls motion speed.
+                    # Set this before I/O so cleanup holds even if the ACK is lost.
+                    self._jogging = True
+                    self._send_target(endpoint)
+                self._applied_intent = intent
         with self._lock:
             self.feedback = dict(status, target_pulse=self.last_sent, jog_intent=intent,
+                                 waiting_for_lease=waiting_for_lease,
                                  target_sequence=self.target_sequence,
                                  target_sent_at=self.target_sent_at, target_ack_received_at=self.target_ack_received_at)
 

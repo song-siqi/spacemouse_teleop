@@ -1,5 +1,10 @@
 # PROGRESS_PLAN
 
+2026-11-06: C6 离线处理和 LeRobot v3/replay 模块已实现，验证记录与使用方式见
+[离线处理说明](docs/offline_processing.md)。来源时间映射仍是估计，物理同步精度未知；
+已完成一条关节增量轨迹的首帧准备与1倍速真机replay，最大关节误差约0.0247 rad。
+TCP action真机回放、更多轨迹和场景仍待验收。下文此前C6的“未实现”描述保留为历史计划。
+
 2026-11-01: main 架构上的 xArm 适配见 [实施与验证记录](docs/xarm_main_adaptation.md)。
 独立 demo 的 H 复位、现场标定、相机绑定及 raw v4 真机录制路径已实现；
 315 项非仿真自动测试和 mock 采集通过；5 条历史真机轨迹离线回放完成，

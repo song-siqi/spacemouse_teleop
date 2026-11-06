@@ -1,0 +1,9 @@
+{
+  "robot_config": "../spacemouse_xarm6_demo.json",
+  "control_hz": 60,
+  "speed": 1.0,
+  "tracking_limits": {
+    "joint_speed_radps": 0.5,
+    "joint_accel_radps2": 1.5
+  }
+}

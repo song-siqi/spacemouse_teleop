@@ -152,6 +152,52 @@ class GripperTest(unittest.TestCase):
         self.channel.error_code = 7
         with self.assertRaises(TeleopFault): self.worker.tick()
 
+    def test_short_fresh_lease_defers_target_until_renewed(self):
+        # Real incident: 58 ms left on an arm-feedback-capped lease, while
+        # gripper I/O requires 100 ms. The button itself is freshly pressed.
+        self.worker.config['socket_timeout_s'] = .1
+        self.worker.submit('open', 1.058)
+        self.worker.tick()
+        self.assertEqual(self.channel.targets, [])
+        self.assertTrue(self.worker.snapshot()['waiting_for_lease'])
+        self.worker.submit('open', 1.2)
+        self.worker.tick()
+        self.worker.tick()
+        self.assertEqual(self.channel.targets, [850])
+        self.assertFalse(self.worker.snapshot()['waiting_for_lease'])
+
+    def test_release_after_deferred_target_does_not_open_later(self):
+        self.worker.config['socket_timeout_s'] = .1
+        self.worker.submit('open', 1.058)
+        self.worker.tick()
+        self.worker.submit('hold', 1.2)
+        self.worker.tick()
+        self.assertEqual(self.channel.targets, [])
+        self.assertFalse(self.worker.snapshot()['waiting_for_lease'])
+
+    def test_reverse_with_short_lease_holds_before_retrying(self):
+        self.worker.config['socket_timeout_s'] = .1
+        self.worker.submit('close', 1.2)
+        self.worker.tick()
+        self.channel.position = 90
+        self.worker.submit('open', 1.058)
+        self.worker.tick()
+        self.assertEqual(self.channel.targets, [0, 90])
+        self.worker.submit('open', 1.2)
+        self.worker.tick()
+        self.assertEqual(self.channel.targets, [0, 90, 850])
+
+    def test_deferred_target_still_faults_if_lease_really_expires(self):
+        now = [1.]
+        self.worker.clock = lambda: now[0]
+        self.worker.config['socket_timeout_s'] = .1
+        self.worker.submit('open', 1.058)
+        self.worker.tick()
+        now[0] = 1.06
+        with self.assertRaisesRegex(TeleopFault, 'expired'):
+            self.worker.tick()
+        self.assertEqual(self.channel.targets, [])
+
     def test_expiry_while_jogging_holds_current_position_before_fault(self):
         self.worker.submit('close', 2.)
         self.worker.tick()
@@ -214,6 +260,28 @@ class BackendTest(unittest.TestCase):
         backend.channel, backend.armed = channel, True
         backend.reports = type('Reports', (), {'snapshot': lambda self: feedback(time.monotonic()), 'close': lambda self: None})()
         return backend, channel
+
+    def test_feedback_capped_arm_lease_does_not_fault_fresh_gripper_press(self):
+        backend, arm = self.make_backend()
+        self.addCleanup(backend.close)
+        backend.config.robot.update(feedback_timeout_s=.25, socket_timeout_s=.05)
+        backend.config.gripper['socket_timeout_s'] = .1
+        now = [10.]
+        tool = FakeChannel()
+        backend.gripper = GripperWorker(tool, backend.config.gripper, clock=lambda:now[0])
+        backend.reports.snapshot = lambda:feedback(9.808)
+        with patch('robot_teleop.backends.real.xarm_sdk.backend.time.monotonic',lambda:now[0]):
+            sent = backend.send((0.,)*6, 10.2, 'open')
+            self.assertAlmostEqual(sent['duration_s'], .008)
+            backend.gripper.tick()
+            self.assertTrue(backend.gripper.snapshot()['waiting_for_lease'])
+            self.assertEqual(tool.targets, [])
+            now[0] = 10.02
+            backend.reports.snapshot = lambda:feedback(now[0])
+            backend.send((0.,)*6, 10.22, 'open')
+            backend.gripper.tick()
+            self.assertEqual(tool.targets, [850])
+            self.assertEqual(len(arm.calls), 2)
 
     def test_expired_send_never_reaches_sdk(self):
         backend, channel = self.make_backend()

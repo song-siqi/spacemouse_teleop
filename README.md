@@ -170,3 +170,13 @@ training actions, or training-format export is performed.
 Historical operational detail remains in [README_LEGACY.md](README_LEGACY.md).
 Its hardware measurements describe the pre-refactor code, not this branch's
 current hardware validation status.
+
+## Offline Processing and Replay
+
+The raw-to-LeRobot v3 pipeline supports configurable fps and joint/TCP absolute or delta actions.
+Use the isolated processing environment and `scripts/run_processing.sh`; see
+[processing, data semantics and replay instructions](docs/offline_processing.md).
+One xArm joint-delta episode has completed hardware replay at 1x after first-state preparation; TCP replay and broader scenarios remain unvalidated.
+
+Replay supports explicit `--prepare-start` to move slowly to the episode first joint state before starting its clock.
+Gripper preparation requires a separate `--prepare-gripper`; see the bounded hardware validation record in the processing guide.
